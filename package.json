@@ -29,7 +29,6 @@
     "builtin-modules": "^3.3.0",
     "esbuild": "^0.20.0",
     "obsidian": "^1.4.11",
-    "obsidian-local-rest-api": "^2.5.4",
     "tslib": "^2.6.0",
     "typescript": "^5.3.0"
   }
