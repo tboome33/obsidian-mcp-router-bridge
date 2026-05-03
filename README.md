@@ -160,9 +160,24 @@ Note: **`tp.mcpTools.prompt(...)`** — accessed directly under `tp`, NOT under 
 npm install
 npm run dev      # esbuild watch mode, rebuilds on file change
 npm run build    # one-shot production build (minified, no sourcemap)
+npm run deploy   # build + copy main.js + manifest.json to your reference vault's
+                 #   .obsidian/plugins/obsidian-mcp-router-bridge/ folder
 ```
 
 The build emits `main.js` at the repo root. Combined with `manifest.json`, that's all Obsidian needs.
+
+`npm run deploy` finds your reference vault by reading `referenceVault` from
+`~/.claude/obsidian-mcp-router/config.json` (the [obsidian-mcp-router](https://github.com/tboome33/obsidian-mcp-router)
+config file). Set the `OBSIDIAN_TEMPLATE_VAULT` environment variable to override.
+
+After deploying, propagate to vaults that already have the plugin installed:
+
+```bash
+# For each consumer vault — re-clones plugins, preserves data.json:
+node "<obsidian-mcp-router>/scripts/setup-vault.mjs" "<vault>" --sync-plugins --force
+```
+
+Then disable+re-enable the plugin in each Obsidian instance, or run "Reload app without saving" from the command palette.
 
 ## License
 
