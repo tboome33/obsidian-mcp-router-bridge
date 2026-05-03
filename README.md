@@ -9,16 +9,16 @@ A minimal Obsidian community plugin that adds two REST routes to the [Local REST
 
 ## Why this exists
 
-The same two routes were originally provided by [`jacksteamdev/obsidian-mcp-tools`](https://github.com/jacksteamdev/obsidian-mcp-tools), which the author deprecated in late 2025 and recommended migrating away from. The companion router project [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) was using only those two routes from MCP Tools — never the bundled `mcp-server.exe` binary that prompted the supply-chain concern. This plugin is the minimum subset needed to keep the router fully functional after MCP Tools is removed.
+The companion router project [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) needs two REST routes — `/search/smart` and `/templates/execute` — to expose semantic search and Templater execution as MCP tools. Local REST API doesn't ship those routes natively; this plugin adds them on top, in the smallest, most boring way possible.
 
 What this plugin does **not** ship:
-- ❌ A bundled native executable (no `mcp-server.exe`)
+- ❌ Any bundled native executable
 - ❌ A built-in MCP server (the router handles that, externally)
 - ❌ Any telemetry or remote calls
 
 What it does:
 - ✅ Two ~150-line REST handlers that delegate to plugins you already have installed (Smart Connections + Templater)
-- ✅ Drop-in replacement: same paths, same request/response schemas, same `tp.mcpTools.prompt("key")` accessor inside templates as the original — your existing usage of `obsidian-mcp-router` keeps working without changes
+- ✅ A `tp.mcpTools.prompt("key")` accessor inside Templater templates — used by the router to inject arguments into rendered templates
 
 ## Install
 
@@ -87,7 +87,7 @@ The `tp.mcpTools.prompt("key")` accessor inside Templater templates is preserved
 
 ### `POST /search/smart`
 
-**Request body** (accepted as either real JSON or a JSON-stringified payload in `text/plain`, for backward compatibility with the original MCP Tools quirk that the obsidian-mcp-router router uses):
+**Request body** (accepted as either real JSON or a JSON-stringified payload in `text/plain` — the router sends the latter):
 
 ```jsonc
 {
@@ -138,7 +138,7 @@ Inside the template, the `arguments` map is exposed at:
 <% tp.mcpTools.prompt("ticker") %>
 ```
 
-Note: **`tp.mcpTools.prompt(...)`** — directly under `tp`, NOT under `tp.user`. This matches the original MCP Tools convention so existing templates keep working.
+Note: **`tp.mcpTools.prompt(...)`** — accessed directly under `tp`, NOT under `tp.user` (which is the convention for Templater user scripts). Easy footgun — copy/paste from a Templater tutorial expecting `tp.user.*` won't find anything.
 
 **Response** (200):
 

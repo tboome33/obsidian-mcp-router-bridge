@@ -2,9 +2,11 @@ import type { App } from 'obsidian';
 import type { SearchSmartRequest, SearchSmartResponse } from '../types';
 
 /**
- * The Smart Search interface as exposed by Smart Connections. Matches
- * the shape MCP Tools' loadSmartSearchAPI uses (see
- * obsidian-mcp-tools/packages/obsidian-plugin/src/shared/index.ts).
+ * The Smart Search interface as exposed by Smart Connections via its
+ * `window.SmartSearch` global. Pre-v3 of Smart Connections shipped this
+ * surface directly; from v3 onward the same shape is also reachable via
+ * the plugin's `env.smart_sources.lookup({ hypotheticals, filter })`
+ * (covered by the resolveSearch fallback chain below).
  */
 interface SmartSearch {
   search(

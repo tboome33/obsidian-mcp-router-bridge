@@ -43,13 +43,14 @@ interface LocalRestApiPlugin {
  *   POST /search/smart        → Smart Connections semantic search
  *   POST /templates/execute   → Templater template execution
  *
- * Drop-in replacement for the same routes in the now-unmaintained
- * jacksteamdev/obsidian-mcp-tools plugin, but without the bundled MCP
- * server binary (no native executable, no telemetry).
+ * Self-contained: adds these routes on top of Local REST API without
+ * bundling a native MCP server binary, telemetry, or any external network
+ * calls. The actual MCP server lives in the companion obsidian-mcp-router
+ * project, which talks to these routes over HTTPS.
  *
- * Companion to obsidian-mcp-router. The route paths and request/response
- * schemas mirror MCP Tools v0.2.31 exactly so existing clients (the router
- * in particular) keep working without changes.
+ * The route paths, request/response schemas, and `tp.mcpTools.prompt`
+ * accessor are kept stable across versions so clients don't break when
+ * this plugin is upgraded.
  */
 export default class McpRouterBridgePlugin extends Plugin {
   /**
