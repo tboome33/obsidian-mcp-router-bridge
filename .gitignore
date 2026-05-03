@@ -17,3 +17,12 @@ build/
 # Plugin local data (when developing inside a vault)
 data.json
 hot-reload.json
+
+# Stub files accidentally created by stray Windows redirections.
+# `>>npm install` typed in cmd creates a 0-byte "npm" file (stdout
+# redirected) and runs whatever resolves as "install" — same for git.
+# Ignoring these names entirely so they can never accidentally land
+# in the repo again. Real npm and git are external commands, never
+# files in this repo.
+/npm
+/git
