@@ -1,0 +1,19 @@
+node_modules/
+main.js
+*.js.map
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Build / temp
+dist/
+build/
+*.tgz
+
+# Plugin local data (when developing inside a vault)
+data.json
+hot-reload.json
