@@ -1,9 +1,9 @@
 {
-  "id": "obsidian-mcp-router-bridge",
+  "id": "mcp-router-bridge",
   "name": "MCP Router Bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.0.0",
-  "description": "Adds /search/smart and /templates/execute REST routes to the Local REST API plugin, delegating to Smart Connections and Templater. Companion plugin for obsidian-mcp-router. No native binary, no telemetry.",
+  "description": "Adds /search/smart and /templates/execute REST routes to the Local REST API plugin, delegating to Smart Connections and Templater. Companion plugin for the multi-vault MCP router. No native binary, no telemetry.",
   "author": "tboome33",
   "authorUrl": "https://github.com/tboome33",
   "fundingUrl": "",

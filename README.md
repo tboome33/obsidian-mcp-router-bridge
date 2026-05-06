@@ -32,13 +32,16 @@ npm install
 npm run build
 
 # 2. Copy the built artifacts to your vault's plugins folder
-#    (replace <VAULT> with your vault's absolute path)
-mkdir -p "<VAULT>/.obsidian/plugins/obsidian-mcp-router-bridge"
-cp main.js manifest.json "<VAULT>/.obsidian/plugins/obsidian-mcp-router-bridge/"
+#    (replace <VAULT> with your vault's absolute path).
+#    The folder name MUST match the `id` in manifest.json — `mcp-router-bridge`.
+mkdir -p "<VAULT>/.obsidian/plugins/mcp-router-bridge"
+cp main.js manifest.json "<VAULT>/.obsidian/plugins/mcp-router-bridge/"
 
 # 3. Restart Obsidian, enable the plugin in:
 #    Settings → Community plugins → MCP Router Bridge
 ```
+
+> **Migrating from v0.1.0?** The plugin ID was renamed from `obsidian-mcp-router-bridge` to `mcp-router-bridge` in v0.1.1 to comply with Obsidian's community-plugin naming policy ("obsidian" is not allowed in plugin IDs since it's redundant). After installing v0.1.1 to the new folder, delete the legacy `<VAULT>/.obsidian/plugins/obsidian-mcp-router-bridge/` folder. Restart Obsidian. The plugin's settings (none currently) and behavior are unchanged.
 
 ### Verify
 
@@ -161,7 +164,7 @@ npm install
 npm run dev      # esbuild watch mode, rebuilds on file change
 npm run build    # one-shot production build (minified, no sourcemap)
 npm run deploy   # build + copy main.js + manifest.json to your reference vault's
-                 #   .obsidian/plugins/obsidian-mcp-router-bridge/ folder
+                 #   .obsidian/plugins/mcp-router-bridge/ folder
 ```
 
 The build emits `main.js` at the repo root. Combined with `manifest.json`, that's all Obsidian needs.

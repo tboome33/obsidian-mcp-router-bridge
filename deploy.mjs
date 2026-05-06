@@ -99,7 +99,25 @@ if (!fs.existsSync(pluginsDir)) {
   );
 }
 
-const dstDir = path.join(pluginsDir, 'obsidian-mcp-router-bridge');
+// Plugin folder name MUST match `id` in manifest.json — Obsidian uses the id
+// as the folder name in `.obsidian/plugins/<id>/`. Renamed in v0.1.1 to drop
+// the "obsidian-" prefix per Obsidian community-plugin guidelines (the word
+// "obsidian" is not allowed in plugin IDs because it's redundant context).
+const PLUGIN_ID = 'mcp-router-bridge';
+const LEGACY_PLUGIN_ID = 'obsidian-mcp-router-bridge';
+
+// Cleanup: if a legacy folder from v0.1.0 (or earlier) exists, remove it so
+// `setup-vault.mjs --sync-plugins --force` doesn't propagate the stale copy
+// to bootstrapped vaults. Loud info log so the user knows we touched their
+// reference vault. Safe: only removes the specific legacy plugin folder, not
+// anything else under .obsidian/plugins/.
+const legacyDir = path.join(pluginsDir, LEGACY_PLUGIN_ID);
+if (fs.existsSync(legacyDir)) {
+  fs.rmSync(legacyDir, { recursive: true, force: true });
+  info(`Removed legacy plugin folder: ${legacyDir}`);
+}
+
+const dstDir = path.join(pluginsDir, PLUGIN_ID);
 fs.mkdirSync(dstDir, { recursive: true });
 
 // 4. Copy main.js + manifest.json (overwrite always — we just rebuilt)
@@ -107,7 +125,7 @@ fs.copyFileSync(MAIN_JS, path.join(dstDir, 'main.js'));
 fs.copyFileSync(MANIFEST, path.join(dstDir, 'manifest.json'));
 
 const mainSize = fs.statSync(MAIN_JS).size;
-ok(`Deployed obsidian-mcp-router-bridge to ${dstDir}`);
+ok(`Deployed ${PLUGIN_ID} to ${dstDir}`);
 info(`main.js: ${mainSize} bytes`);
 
 // 5. Tell the user what's next
