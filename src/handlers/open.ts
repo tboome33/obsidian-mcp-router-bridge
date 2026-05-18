@@ -1,4 +1,4 @@
-import type { App } from 'obsidian';
+import type { App, TFile } from 'obsidian';
 
 /**
  * GET /open/<vault-relative-path>
@@ -98,17 +98,58 @@ export function makeOpenHandler(app: App) {
         return;
       }
 
-      // Open in the active pane. openLinkText(linktext, sourcePath, newLeaf)
-      // is Obsidian's canonical navigation API — same as a click on a
-      // wikilink in the UI. newLeaf=false reuses the active pane.
-      await app.workspace.openLinkText(normalized, '', false);
+      // Open in the active pane. We prefer leaf.openFile(TFile) over
+      // workspace.openLinkText(text, '', false) — openFile is the direct
+      // navigation API (the same one most plugins use for "open this file"
+      // commands), while openLinkText goes through wikilink resolution which
+      // can no-op silently if the link target is interpreted as ambiguous.
+      // Folders fall back to openLinkText which handles the "show folder"
+      // case gracefully.
+      const isTFile = typeof (file as any).extension === 'string';
+      if (isTFile) {
+        const leaf = app.workspace.getLeaf(false);
+        await leaf.openFile(file as TFile);
+      } else {
+        await app.workspace.openLinkText(normalized, '', false);
+      }
 
-      // Best-effort: surface Obsidian's window. Some platforms don't allow
-      // a plugin to raise the app window from the background; we try and
-      // swallow any error.
+      // Best-effort window surfacing. Obsidian is Electron-based — we try
+      // multiple paths because the API surface for "bring window to front"
+      // changed across Electron versions and Obsidian doesn't expose a
+      // first-party helper for it. All attempts are wrapped in try/catch
+      // and swallowed; if none of them work, the file is still open in
+      // Obsidian and the user just needs to Alt+Tab to it.
       try {
-        const win = (app as any).workspace?.containerEl?.ownerDocument?.defaultView;
-        if (win && typeof win.focus === 'function') win.focus();
+        const win: any = (app as any).workspace?.containerEl?.ownerDocument?.defaultView;
+        if (win) {
+          // 1. Plain window.focus() — works in some browsers, no-op for
+          //    Electron BrowserWindows in the background.
+          if (typeof win.focus === 'function') {
+            try { win.focus(); } catch { /* ignore */ }
+          }
+
+          // 2. Electron remote (older Electron API path, still present in
+          //    Obsidian's Electron version as of this writing).
+          try {
+            const electronRemote = win.require?.('@electron/remote');
+            const browserWindow = electronRemote?.getCurrentWindow?.();
+            if (browserWindow) {
+              try { browserWindow.show?.(); } catch { /* ignore */ }
+              try { browserWindow.focus?.(); } catch { /* ignore */ }
+              try { browserWindow.moveTop?.(); } catch { /* ignore */ }
+            }
+          } catch { /* ignore */ }
+
+          // 3. Legacy electron.remote (deprecated but sometimes still works).
+          try {
+            const legacyRemote = win.require?.('electron')?.remote;
+            const legacyWindow = legacyRemote?.getCurrentWindow?.();
+            if (legacyWindow) {
+              try { legacyWindow.show?.(); } catch { /* ignore */ }
+              try { legacyWindow.focus?.(); } catch { /* ignore */ }
+            }
+          } catch { /* ignore */ }
+        }
       } catch {
         /* ignore */
       }
