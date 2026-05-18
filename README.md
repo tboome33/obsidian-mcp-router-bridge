@@ -1,11 +1,12 @@
 # obsidian-mcp-router-bridge
 
-A minimal Obsidian community plugin that adds two REST routes to the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, delegating to [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) and [Templater](https://github.com/SilentVoid13/Templater):
+A minimal Obsidian community plugin that adds three REST routes to the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin:
 
-| Route | Delegates to | Used by |
-|---|---|---|
-| `POST /search/smart` | Smart Connections — semantic search via vector embeddings | `obsidian-mcp-router` `search_smart` tool |
-| `POST /templates/execute` | Templater — render a template, optionally write to a new file | `obsidian-mcp-router` `execute_template` tool |
+| Route | Auth | Delegates to | Used by |
+|---|---|---|---|
+| `POST /search/smart` | Bearer | [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) — semantic search via vector embeddings | `obsidian-mcp-router` `search_smart` tool |
+| `POST /templates/execute` | Bearer | [Templater](https://github.com/SilentVoid13/Templater) — render a template, optionally write to a new file | `obsidian-mcp-router` `execute_template` tool |
+| `GET /open/<path>` | **None** (loopback-only, public route) | Obsidian's `workspace.openLinkText` — navigate to a vault file | Click-to-open links from Claude Code chat / any client emitting clickable http URLs |
 
 ## Why this exists
 
@@ -17,8 +18,9 @@ What this plugin does **not** ship:
 - ❌ Any telemetry or remote calls
 
 What it does:
-- ✅ Two ~150-line REST handlers that delegate to plugins you already have installed (Smart Connections + Templater)
+- ✅ Three REST handlers (~250 lines total) that delegate to plugins / Obsidian APIs you already have (Smart Connections + Templater + Obsidian workspace navigation)
 - ✅ A `tp.mcpTools.prompt("key")` accessor inside Templater templates — used by the router to inject arguments into rendered templates
+- ✅ A no-auth loopback-only `GET /open/<path>` for clickable http links — see [Click-to-open](#click-to-open) below
 
 ## Install
 
@@ -42,6 +44,42 @@ cp main.js manifest.json "<VAULT>/.obsidian/plugins/mcp-router-bridge/"
 ```
 
 > **Migrating from v0.1.0?** The plugin ID was renamed from `obsidian-mcp-router-bridge` to `mcp-router-bridge` in v0.1.1 to comply with Obsidian's community-plugin naming policy ("obsidian" is not allowed in plugin IDs since it's redundant). After installing v0.1.1 to the new folder, delete the legacy `<VAULT>/.obsidian/plugins/obsidian-mcp-router-bridge/` folder. Restart Obsidian. The plugin's settings (none currently) and behavior are unchanged.
+
+## Click-to-open
+
+`GET /open/<vault-relative-path>` opens a file in Obsidian when hit. **No Bearer token required** — this is a `addPublicRoute()` registration (Local REST API v3.x+ feature). Designed for surfacing wiki pages from clients that emit clickable http(s) links (Claude Code CLI, browsers, etc.) where `obsidian://` URIs aren't dispatched.
+
+### How to use
+
+```
+https://127.0.0.1:<port>/open/<URL-encoded-vault-path>
+```
+
+Example for `wiki/references/router-agents.md` in a vault whose Local REST API runs on port 27132:
+
+```
+https://127.0.0.1:27132/open/wiki%2Freferences%2Frouter-agents.md
+```
+
+A click → browser GETs the URL → bridge calls `app.workspace.openLinkText` → Obsidian navigates to the file → browser tab shows a tiny "Opened in Obsidian" page that attempts to auto-close (browser-dependent).
+
+### Security model
+
+- **Loopback-only.** Local REST API binds 127.0.0.1 by default; the handler additionally checks `req.ip` as defense-in-depth and refuses non-loopback requests.
+- **No auth.** The scope is intentionally minimal — navigation only, no content read, no write, no execution. Other processes running locally as the same user could already read the vault directly via the filesystem; this route doesn't expand their attack surface.
+- **Path traversal refused.** `..` segments, absolute paths, Windows drive letters all return 403.
+- **File must exist.** `getAbstractFileByPath` returns null → 404.
+
+Why no Bearer token: a click navigation cannot attach an `Authorization` header, and embedding the token into the URL would expose it in browser history and clipboard. Localhost + minimal scope makes the unauth registration the right trade-off here.
+
+### HTTPS cert warning
+
+Local REST API ships HTTPS with a self-signed cert by default. First click per port shows a browser warning ("Not Secure / Advanced / Continue"). Subsequent clicks within the same browser session are fine. To eliminate the warning, enable the **HTTP server** in Settings → Local REST API and use that port instead of the HTTPS one.
+
+### Requirements
+
+- `mcp-router-bridge` ≥ v0.2.0 installed and enabled in the vault.
+- Local REST API version that exposes `addPublicRoute()` (v3.x recent — if not available, the bridge logs a warning at load and skips this route; the other two routes still work normally).
 
 ### Verify
 

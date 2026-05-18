@@ -1,6 +1,7 @@
 import { Plugin, type PluginManifest } from 'obsidian';
 import { makeSearchSmartHandler } from './src/handlers/search-smart';
 import { makeTemplatesExecuteHandler } from './src/handlers/templates-execute';
+import { makeOpenHandler } from './src/handlers/open';
 
 /**
  * Local REST API public API surface (see
@@ -19,6 +20,13 @@ interface LocalRestApiRouteBuilder {
 
 interface LocalRestApiPublicApi {
   addRoute: (path: string) => LocalRestApiRouteBuilder;
+  /**
+   * Register a route that bypasses Local REST API's Bearer-token check.
+   * Used here for GET /open/* — see security analysis in
+   * src/handlers/open.ts (scope = navigation-only, loopback-only,
+   * no read/write access to content).
+   */
+  addPublicRoute?: (path: string) => LocalRestApiRouteBuilder;
   unregister: () => void;
 }
 
@@ -42,6 +50,10 @@ interface LocalRestApiPlugin {
  *
  *   POST /search/smart        → Smart Connections semantic search
  *   POST /templates/execute   → Templater template execution
+ *   GET  /open/<path>         → Navigate Obsidian to a vault file
+ *                                (loopback-only, no auth; for clickable
+ *                                http links in chat/terminal contexts
+ *                                where obsidian:// URIs aren't dispatched)
  *
  * Self-contained: adds these routes on top of Local REST API without
  * bundling a native MCP server binary, telemetry, or any external network
@@ -120,6 +132,7 @@ export default class McpRouterBridgePlugin extends Plugin {
 
     const searchHandler = makeSearchSmartHandler(this.app);
     const templatesHandler = makeTemplatesExecuteHandler(this.app);
+    const openHandler = makeOpenHandler(this.app);
 
     try {
       publicApi.addRoute('/search/smart').post(searchHandler);
@@ -135,6 +148,32 @@ export default class McpRouterBridgePlugin extends Plugin {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[mcp-router-bridge] Failed to register /templates/execute:', err);
+    }
+
+    try {
+      // Express 4 wildcard: '/open/*' matches anything under /open/, with
+      // the matched portion in req.params[0]. See src/handlers/open.ts
+      // for the security analysis (loopback-only, path traversal guards,
+      // navigation-scope, justified no-auth).
+      //
+      // We use addPublicRoute (not addRoute) so Local REST API skips its
+      // Bearer-token check for this endpoint. A click navigation from a
+      // browser cannot attach an Authorization header, and embedding the
+      // API key into the URL would expose it in browser history and
+      // clipboard — so unauth here is mandatory, not a convenience. The
+      // scope is intentionally minimal (navigation only, no content read,
+      // no write, no execution) to keep the trust surface small.
+      if (typeof publicApi.addPublicRoute !== 'function') {
+        console.warn(
+          '[mcp-router-bridge] Local REST API does not expose addPublicRoute() — skipping /open/* registration. Upgrade obsidian-local-rest-api to a version that supports public (auth-less) routes.',
+        );
+      } else {
+        publicApi.addPublicRoute('/open/*').get(openHandler);
+        this.registeredPaths.push('/open/* (public, no-auth)');
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[mcp-router-bridge] Failed to register /open/*:', err);
     }
 
     if (this.registeredPaths.length) {
