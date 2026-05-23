@@ -6,6 +6,25 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.2.1] — 2026-05-23
+
+Triggered by Roland clicking a click-to-open link (`http://127.0.0.1:27141/open/wiki/Refs/dedibox-rdp-pc-cabinet.md`) that returned **HTTP 40101 Authorization required**. Audit across the 10 configured vaults revealed two compounding drifts: 8/10 vaults had bridge v0.1.1 (no `/open/*` route) and 8/10 had Local REST API v3.6.1 (no `addPublicRoute()` method — see "Documentation" below). Both invisible to existing diagnostics.
+
+### Added
+
+- **`postbuild` hook in `package.json`** — `npm run build` now auto-deploys to `.template` via the existing `deploy.mjs` script. Closes the silent-drift root cause: prior to this hook, `.template` could lag behind a fresh build (which is what produced the 8-vault v0.1.1 state — the v0.2.0 build was made on 2026-05-18 but `deploy.mjs` was never invoked, so `.template` stayed at v0.1.1 and all consumer vaults inherited the stale version).
+- **`npm run deploy:all`** — one-shot command: builds + auto-pushes to `.template` (via postbuild) + propagates to every vault in the router's portRegistry via `node <router>/scripts/setup-vault.mjs --sync-all --force`. Router-repo path resolved as a sibling directory by default (`../obsidian-mcp-router`), overridable via `OBSIDIAN_ROUTER_REPO` env var.
+- **`deploy.mjs --all` flag** — implements the propagation step of `deploy:all`. Errors out with a clear remediation message if `--all` is passed but the router repo can't be located. Without the flag, `deploy.mjs` behavior is unchanged.
+
+### Documentation
+
+- **`CHANGELOG.md` v0.2.0 correction**: the prior entry stated `addPublicRoute()` requires "Local REST API recent v3.x+" — this is **wrong**. The method was introduced in **Local REST API v4.0.0**. On v3.x lines, the bridge silently logs `addPublicRoute() not exposed — skipping /open/* registration` and Local REST API's auth middleware returns HTTP 401 on every `/open/*` request. This misleading line is the historic record of the prereq bug observed in production this week.
+- `wiki/obsidian-mcp-router-bridge/project-bridge.md` (in the companion vault) — Build & deploy section updated to document the new `npm run deploy:all` workflow.
+
+### Migration
+
+- Existing installs: pull, `npm install`, `npm run deploy:all`, then reload Obsidian once per running instance to activate the new code in memory. The router's `npm run audit:bridge-readiness` (router v0.12.3) verifies all four prerequisites including the live `/open` probe.
+
 ## [0.2.0] — 2026-05-18
 
 ### Added

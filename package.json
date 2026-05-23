@@ -1,12 +1,14 @@
 {
   "name": "obsidian-mcp-router-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Adds /search/smart, /templates/execute, and GET /open/<path> REST routes to the Local REST API plugin. Companion plugin for the multi-vault MCP router. No native binary, no telemetry.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "deploy": "npm run build && node deploy.mjs",
+    "postbuild": "node deploy.mjs",
+    "deploy": "npm run build",
+    "deploy:all": "npm run build && node deploy.mjs --all",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [

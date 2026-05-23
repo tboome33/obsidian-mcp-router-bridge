@@ -7,18 +7,24 @@
  * (in the obsidian-mcp-router repo) clones from when bootstrapping or
  * --sync-plugins-ing other vaults.
  *
- * Run after `npm run build`. To propagate the new build to vaults
- * that already have the plugin installed:
+ * Auto-runs after every `npm run build` via the `postbuild` hook in
+ * package.json. Manual invocation works too.
  *
- *   1. Run this script (deploys to .template)
- *   2. Run setup-vault.mjs --sync-plugins --force <vault> on each
- *      consumer vault (re-clones plugins, preserves data.json)
- *   3. Disable+re-enable the plugin in each Obsidian vault, OR run the
- *      "Reload app without saving" command from the palette
+ * Flags:
+ *   --all   Also propagate from `.template` to every vault in the
+ *           router's portRegistry by spawning
+ *           `node <router>/scripts/setup-vault.mjs --sync-all --force`.
+ *           Wired up as `npm run deploy:all`. Obsidian still needs a
+ *           manual reload per running instance afterwards.
  *
  * Resolves the .template path in this order:
  *   1. OBSIDIAN_TEMPLATE_VAULT env var (override)
  *   2. ~/.claude/obsidian-mcp-router/config.json `referenceVault` field
+ *   3. error out with instructions
+ *
+ * Resolves the router repo path (for --all) in this order:
+ *   1. OBSIDIAN_ROUTER_REPO env var (override)
+ *   2. sibling directory convention: <bridge>/../obsidian-mcp-router
  *   3. error out with instructions
  *
  * The router-config dependency is pragmatic: anyone running this bridge
@@ -29,6 +35,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const SELF_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]):/, '$1:'));
 const MAIN_JS = path.join(SELF_DIR, 'main.js');
@@ -128,10 +135,51 @@ const mainSize = fs.statSync(MAIN_JS).size;
 ok(`Deployed ${PLUGIN_ID} to ${dstDir}`);
 info(`main.js: ${mainSize} bytes`);
 
-// 5. Tell the user what's next
-console.log('');
-info('Next steps:');
-console.log('  1. Propagate to other vaults that already have the plugin installed:');
-console.log(`     node "<router-repo>/scripts/setup-vault.mjs" "<vault>" --sync-plugins --force`);
-console.log('  2. In each Obsidian instance: disable+re-enable the plugin,');
-console.log('     OR run the "Reload app without saving" command from the palette.');
+// 5. Optional --all: propagate from .template to every vault in the router's
+//    portRegistry. Skipped by default — postbuild only touches .template so dev
+//    rebuilds stay fast; `npm run deploy:all` is the explicit "ship everywhere".
+const args = process.argv.slice(2);
+if (args.includes('--all')) {
+  console.log('');
+  info('--all: propagating to every vault in the router portRegistry…');
+
+  let routerRepo = process.env.OBSIDIAN_ROUTER_REPO;
+  if (!routerRepo) {
+    routerRepo = path.resolve(SELF_DIR, '..', 'obsidian-mcp-router');
+  }
+  const setupScript = path.join(routerRepo, 'scripts', 'setup-vault.mjs');
+  if (!fs.existsSync(setupScript)) {
+    fail(
+      `Cannot locate the router's setup-vault.mjs.\n  ` +
+      `Looked at: ${setupScript}\n  ` +
+      `Set OBSIDIAN_ROUTER_REPO=<absolute-path-to-router-repo> or place this bridge\n  ` +
+      `repo as a sibling of obsidian-mcp-router/ (the default convention).`,
+    );
+  }
+
+  info(`Router repo: ${routerRepo}`);
+  const result = spawnSync(
+    process.execPath,
+    [setupScript, '--sync-all', '--force'],
+    { stdio: 'inherit' },
+  );
+  if (result.status !== 0) {
+    fail(`setup-vault.mjs --sync-all --force exited with code ${result.status}`);
+  }
+
+  console.log('');
+  ok('All vaults synced from .template.');
+  console.log('');
+  info('Final step (manual): in each running Obsidian instance, either');
+  console.log('  • Cmd/Ctrl+P → "Reload app without saving", OR');
+  console.log('  • Settings → Community plugins → toggle MCP Router Bridge off/on');
+} else {
+  // 6. Hint at the next steps when --all wasn't passed
+  console.log('');
+  info('Next steps:');
+  console.log('  • Propagate to every consumer vault in one shot:');
+  console.log('      npm run deploy:all');
+  console.log('    (or manually: node "<router-repo>/scripts/setup-vault.mjs" --sync-all --force)');
+  console.log('  • Then in each Obsidian instance: disable+re-enable the plugin,');
+  console.log('    OR run the "Reload app without saving" command from the palette.');
+}
