@@ -1,4 +1,5 @@
 import type { App, TFile } from 'obsidian';
+import { parseOpenParams } from './open-params.mjs';
 
 /**
  * GET /open/<vault-relative-path>[?h=<heading>][&reveal=0]
@@ -114,24 +115,27 @@ export function makeOpenHandler(app: App) {
       // invisible here. See parseOpenParams().
       const { heading, reveal } = parseOpenParams(req);
 
-      // Open in the active pane. We prefer leaf.openFile(TFile) over
-      // workspace.openLinkText(text, '', false) — openFile is the direct
-      // navigation API (the same one most plugins use for "open this file"
-      // commands), while openLinkText goes through wikilink resolution which
-      // can no-op silently if the link target is interpreted as ambiguous.
-      // EXCEPTION: when a heading anchor is requested we use openLinkText with
-      // a `path#Heading` subpath — that's the exact mechanism a
-      // `[[note#Heading]]` wikilink click uses, and it resolves + scrolls in
-      // one call. With a FULL vault-relative path the target is unambiguous,
-      // so the "silent no-op" risk that motivates openFile elsewhere doesn't
-      // apply here. Folders fall back to openLinkText which handles the
-      // "show folder" case gracefully.
+      // Open in the active pane. Files open by their VERIFIED TFile reference
+      // (rationale in the block comment below); folders fall back to
+      // openLinkText, which handles the "show folder" case gracefully.
       const isTFile = typeof (file as any).extension === 'string';
-      if (isTFile && heading) {
-        await app.workspace.openLinkText(normalized + '#' + heading, '', false);
-      } else if (isTFile) {
+      if (isTFile) {
+        // Open by the VERIFIED TFile reference — never re-resolved — so the
+        // traversal guard + getAbstractFileByPath check above stay the single
+        // source of truth for WHICH file opens. A heading anchor is applied
+        // as an ephemeral subpath: `eState.subpath` is the same mechanism
+        // Obsidian's own link handling uses to scroll to a heading/block, and
+        // a subpath can only scroll WITHIN the file — it can't navigate out of
+        // it. (Pre-review this branch used openLinkText("path#heading"), which
+        // re-resolved the path STRING via fuzzy wikilink resolution and thus
+        // discarded the verified TFile — code-review finding 2026-06-02.) If
+        // the heading doesn't match, the file still opens at the top — graceful
+        // degradation, never a failure.
         const leaf = app.workspace.getLeaf(false);
-        await leaf.openFile(file as TFile);
+        await leaf.openFile(
+          file as TFile,
+          heading ? { eState: { subpath: '#' + heading } } : undefined,
+        );
       } else {
         await app.workspace.openLinkText(normalized, '', false);
       }
@@ -235,49 +239,4 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-/**
- * Extract the optional navigation params from the request query string.
- * Pure (no Obsidian/IO) so it can be unit-tested in isolation.
- *
- *   - `h`      → heading text to scroll to. Accepted with or without a
- *                leading `#` (so both `?h=Install` and `?h=%23Install`
- *                work). Empty/whitespace → null (no anchor).
- *   - `reveal` → reveal the file in the treeview. Default TRUE; only the
- *                explicit falsy tokens `0` / `false` / `no` / `off`
- *                (case-insensitive) turn it off.
- *
- * Express 4 populates `req.query`. We also tolerate a manual fallback by
- * parsing the query string off `req.originalUrl` / `req.url` — covers odd
- * route registrations and makes the function testable with a plain object.
- * Repeated params (Express yields arrays) collapse to their first value.
- */
-export function parseOpenParams(
-  req: { query?: Record<string, unknown>; originalUrl?: string; url?: string } | null | undefined,
-): { heading: string | null; reveal: boolean } {
-  let q: Record<string, unknown> =
-    req && req.query && typeof req.query === 'object' ? req.query : {};
-
-  if (!q || Object.keys(q).length === 0) {
-    const url = String((req && (req.originalUrl || req.url)) || '');
-    const qIdx = url.indexOf('?');
-    if (qIdx !== -1) {
-      q = Object.fromEntries(new URLSearchParams(url.slice(qIdx + 1)).entries());
-    }
-  }
-
-  const first = (v: unknown): unknown => (Array.isArray(v) ? v[0] : v);
-
-  let heading: string | null = null;
-  const rawH = first(q.h);
-  if (typeof rawH === 'string') {
-    const trimmed = rawH.trim().replace(/^#/, '').trim();
-    if (trimmed.length > 0) heading = trimmed;
-  }
-
-  const rawR = first(q.reveal);
-  const reveal = !(typeof rawR === 'string' && /^(0|false|no|off)$/i.test(rawR.trim()));
-
-  return { heading, reveal };
 }
