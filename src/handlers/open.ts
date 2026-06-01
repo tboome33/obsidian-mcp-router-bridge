@@ -1,11 +1,19 @@
 import type { App, TFile } from 'obsidian';
 
 /**
- * GET /open/<vault-relative-path>
+ * GET /open/<vault-relative-path>[?h=<heading>][&reveal=0]
  *
  * Navigates Obsidian to the specified file in the active pane. Returns a
  * tiny HTML page that auto-closes on Chrome/Edge when opened as a new
  * tab/popup (best-effort — depends on the browser's window.close policy).
+ *
+ * Optional query params (v0.3.0):
+ *   - `h=<heading>` — scroll to a heading inside the note (the heading's
+ *     TEXT, e.g. `?h=Installation`). Obsidian headings ARE their own anchor
+ *     (no marker to insert). MUST be a query param, not a `#fragment` —
+ *     browsers never transmit the fragment to the server.
+ *   - `reveal=0` — suppress revealing the file in the file-explorer
+ *     treeview. Default is ON (reveal + select the opened note).
  *
  * Purpose: make wiki pages clickable from Claude Code chat (or any client
  * that emits clickable http(s) links). The `obsidian://` URI scheme is
@@ -98,19 +106,49 @@ export function makeOpenHandler(app: App) {
         return;
       }
 
+      // Optional navigation params from the query string (v0.3.0):
+      //   ?h=<heading>   scroll to a heading anchor inside the note
+      //   ?reveal=0      suppress revealing the file in the treeview
+      // The heading travels as a QUERY param, never as a `#fragment` —
+      // browsers never send the fragment to the server, so `#…` would be
+      // invisible here. See parseOpenParams().
+      const { heading, reveal } = parseOpenParams(req);
+
       // Open in the active pane. We prefer leaf.openFile(TFile) over
       // workspace.openLinkText(text, '', false) — openFile is the direct
       // navigation API (the same one most plugins use for "open this file"
       // commands), while openLinkText goes through wikilink resolution which
       // can no-op silently if the link target is interpreted as ambiguous.
-      // Folders fall back to openLinkText which handles the "show folder"
-      // case gracefully.
+      // EXCEPTION: when a heading anchor is requested we use openLinkText with
+      // a `path#Heading` subpath — that's the exact mechanism a
+      // `[[note#Heading]]` wikilink click uses, and it resolves + scrolls in
+      // one call. With a FULL vault-relative path the target is unambiguous,
+      // so the "silent no-op" risk that motivates openFile elsewhere doesn't
+      // apply here. Folders fall back to openLinkText which handles the
+      // "show folder" case gracefully.
       const isTFile = typeof (file as any).extension === 'string';
-      if (isTFile) {
+      if (isTFile && heading) {
+        await app.workspace.openLinkText(normalized + '#' + heading, '', false);
+      } else if (isTFile) {
         const leaf = app.workspace.getLeaf(false);
         await leaf.openFile(file as TFile);
       } else {
         await app.workspace.openLinkText(normalized, '', false);
+      }
+
+      // Reveal the just-opened file in the file-explorer treeview (visible +
+      // selected), unless explicitly disabled with ?reveal=0. The core
+      // "file-explorer:reveal-active-file" command acts on the ACTIVE file —
+      // which we just opened above. Best-effort: the command only exists if
+      // the core File Explorer plugin is enabled; wrapped + swallowed so a
+      // missing command never breaks navigation. The default is ON because
+      // the whole point of an /open click is to surface the note.
+      if (reveal) {
+        try {
+          (app as any).commands?.executeCommandById?.('file-explorer:reveal-active-file');
+        } catch {
+          /* ignore — reveal is a nicety, not a requirement */
+        }
       }
 
       // Best-effort window surfacing. Obsidian is Electron-based — we try
@@ -159,12 +197,13 @@ export function makeOpenHandler(app: App) {
       // tab navigations. So the close attempt is best-effort; the page
       // itself remains a friendly status message.
       const safePath = escapeHtml(normalized);
+      const safeHeading = heading ? ' at <code>#' + escapeHtml(heading) + '</code>' : '';
       const html =
         '<!doctype html><meta charset="utf-8"><title>Opened in Obsidian</title>' +
         '<style>body{font-family:system-ui,-apple-system,sans-serif;padding:2em;color:#444;text-align:center;background:#fafafa}' +
         'code{background:#eee;padding:2px 6px;border-radius:3px}' +
         '.muted{font-size:0.85em;color:#888;margin-top:1em}</style>' +
-        '<p>Opened <code>' + safePath + '</code> in Obsidian.</p>' +
+        '<p>Opened <code>' + safePath + '</code>' + safeHeading + ' in Obsidian.</p>' +
         '<p class="muted">You can close this tab.</p>' +
         '<script>setTimeout(function(){try{window.close()}catch(e){}}, 100);</script>';
 
@@ -196,4 +235,49 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * Extract the optional navigation params from the request query string.
+ * Pure (no Obsidian/IO) so it can be unit-tested in isolation.
+ *
+ *   - `h`      → heading text to scroll to. Accepted with or without a
+ *                leading `#` (so both `?h=Install` and `?h=%23Install`
+ *                work). Empty/whitespace → null (no anchor).
+ *   - `reveal` → reveal the file in the treeview. Default TRUE; only the
+ *                explicit falsy tokens `0` / `false` / `no` / `off`
+ *                (case-insensitive) turn it off.
+ *
+ * Express 4 populates `req.query`. We also tolerate a manual fallback by
+ * parsing the query string off `req.originalUrl` / `req.url` — covers odd
+ * route registrations and makes the function testable with a plain object.
+ * Repeated params (Express yields arrays) collapse to their first value.
+ */
+export function parseOpenParams(
+  req: { query?: Record<string, unknown>; originalUrl?: string; url?: string } | null | undefined,
+): { heading: string | null; reveal: boolean } {
+  let q: Record<string, unknown> =
+    req && req.query && typeof req.query === 'object' ? req.query : {};
+
+  if (!q || Object.keys(q).length === 0) {
+    const url = String((req && (req.originalUrl || req.url)) || '');
+    const qIdx = url.indexOf('?');
+    if (qIdx !== -1) {
+      q = Object.fromEntries(new URLSearchParams(url.slice(qIdx + 1)).entries());
+    }
+  }
+
+  const first = (v: unknown): unknown => (Array.isArray(v) ? v[0] : v);
+
+  let heading: string | null = null;
+  const rawH = first(q.h);
+  if (typeof rawH === 'string') {
+    const trimmed = rawH.trim().replace(/^#/, '').trim();
+    if (trimmed.length > 0) heading = trimmed;
+  }
+
+  const rawR = first(q.reveal);
+  const reveal = !(typeof rawR === 'string' && /^(0|false|no|off)$/i.test(rawR.trim()));
+
+  return { heading, reveal };
 }

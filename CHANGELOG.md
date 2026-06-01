@@ -6,6 +6,24 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.3.0] — 2026-06-02 — `/open` heading anchors + treeview reveal
+
+Deep-linking for click-to-open. `GET /open/<path>` now accepts two optional query params so a clicked link can land on a specific section and surface the note in the file tree.
+
+### Added
+
+- **`?h=<heading>` — scroll to a heading.** The handler navigates via `app.workspace.openLinkText("<path>#<heading>", "", false)` (the same resolution a `[[note#Heading]]` wikilink click uses) instead of `leaf.openFile`, so Obsidian scrolls to the heading. Obsidian headings ARE their own anchor — nothing is inserted into the note (read-only). The heading travels as a **query param**, never as a `#fragment`: browsers never transmit the fragment to the server, so `#…` would be invisible to the handler. Accepted with or without a leading `#`.
+- **`?reveal=0` — opt out of the treeview reveal.** By default `/open` now also runs the core `file-explorer:reveal-active-file` command after navigating, so the opened note is **revealed + selected** in the file-explorer tree. Best-effort (wrapped + swallowed if the File Explorer core plugin is disabled). `?reveal=0` / `false` / `no` / `off` disables it. Backward compatible: a bare `/open/<path>` behaves exactly as before, plus the reveal.
+- **`parseOpenParams()`** — extracted as a pure, exported function (query → `{ heading, reveal }`) with the heading-normalization + reveal-default logic. Unit-tested in isolation.
+
+### Tests
+
+- **`tests/open-params.test.mjs`** (13 tests) + a `test` npm script (`node --test tests/*.test.mjs`) — the bridge's first test suite. Covers heading normalization (leading-`#` strip, trim, empty→null, array-collapse, non-string), the reveal default + falsy-token set, the raw-URL fallback parse, and null/undefined robustness. Runs under Node's built-in TS type stripping (≥ 23.6) — `open.ts` has only erasable syntax, so importing it pulls in no `obsidian` runtime dependency.
+
+### Migration
+
+- Existing installs: pull, `npm install`, `npm run build` (deploys to `.template`), then `npm run deploy:all` to propagate to consumer vaults, and reload Obsidian once per running instance. Old click-to-open URLs keep working unchanged (they just gain the treeview reveal). The router emits `?h=` only when a caller passes an `anchor` (router ≥ 0.22.0).
+
 ## [0.2.1] — 2026-05-23
 
 Triggered by Roland clicking a click-to-open link (`http://127.0.0.1:27141/open/wiki/Refs/dedibox-rdp-pc-cabinet.md`) that returned **HTTP 40101 Authorization required**. Audit across the 10 configured vaults revealed two compounding drifts: 8/10 vaults had bridge v0.1.1 (no `/open/*` route) and 8/10 had Local REST API v3.6.1 (no `addPublicRoute()` method — see "Documentation" below). Both invisible to existing diagnostics.

@@ -18,6 +18,9 @@ build/
 data.json
 hot-reload.json
 
+# Local environment (never commit — may carry vault paths / secrets)
+.env
+
 # Stub files accidentally created by stray Windows redirections.
 # `>>npm install` typed in cmd creates a 0-byte "npm" file (stdout
 # redirected) and runs whatever resolves as "install" — same for git.
