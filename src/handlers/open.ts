@@ -120,22 +120,23 @@ export function makeOpenHandler(app: App) {
       // openLinkText, which handles the "show folder" case gracefully.
       const isTFile = typeof (file as any).extension === 'string';
       if (isTFile) {
-        // Open by the VERIFIED TFile reference — never re-resolved — so the
+        // Open the VERIFIED TFile reference — never re-resolved — so the
         // traversal guard + getAbstractFileByPath check above stay the single
-        // source of truth for WHICH file opens. A heading anchor is applied
-        // as an ephemeral subpath: `eState.subpath` is the same mechanism
-        // Obsidian's own link handling uses to scroll to a heading/block, and
-        // a subpath can only scroll WITHIN the file — it can't navigate out of
-        // it. (Pre-review this branch used openLinkText("path#heading"), which
-        // re-resolved the path STRING via fuzzy wikilink resolution and thus
-        // discarded the verified TFile — code-review finding 2026-06-02.) If
-        // the heading doesn't match, the file still opens at the top — graceful
-        // degradation, never a failure.
+        // source of truth for WHICH file opens.
         const leaf = app.workspace.getLeaf(false);
-        await leaf.openFile(
-          file as TFile,
-          heading ? { eState: { subpath: '#' + heading } } : undefined,
-        );
+        await leaf.openFile(file as TFile);
+        if (heading) {
+          // Scroll to the heading via a BARE-subpath link ('#heading', with NO
+          // path before the '#'). A subpath-only linktext can only resolve
+          // WITHIN the source file — it can never point at a different file —
+          // so the verified-TFile guarantee above holds. Unlike a raw
+          // `eState.subpath` (which positions silently), openLinkText applies
+          // Obsidian's NATIVE scroll + heading highlight — the visual feedback
+          // you get clicking a `[[note#heading]]` link. sourcePath = the path
+          // we just opened. If the heading doesn't exist, the file stays at the
+          // top — graceful degradation, never a failure.
+          await app.workspace.openLinkText('#' + heading, normalized, false);
+        }
       } else {
         await app.workspace.openLinkText(normalized, '', false);
       }
@@ -200,16 +201,21 @@ export function makeOpenHandler(app: App) {
       // browser windows opened via JS (popup-style) — not on regular
       // tab navigations. So the close attempt is best-effort; the page
       // itself remains a friendly status message.
-      const safePath = escapeHtml(normalized);
-      const safeHeading = heading ? ' at <code>#' + escapeHtml(heading) + '</code>' : '';
+      // Minimal auto-close page. The browser tab is an unavoidable artifact of
+      // an http click-to-open (the terminal won't dispatch obsidian:// URIs),
+      // so make it as invisible as possible: try to close IMMEDIATELY, before
+      // the (empty) body paints — nothing flashes when the close is instant.
+      // The fallback text only fills in after a short delay IF the browser
+      // refused to self-close (a top-level navigation can't always close
+      // itself). No user input is echoed → no reflected-XSS surface, so the
+      // old path-echo + escapeHtml() are gone.
       const html =
-        '<!doctype html><meta charset="utf-8"><title>Opened in Obsidian</title>' +
-        '<style>body{font-family:system-ui,-apple-system,sans-serif;padding:2em;color:#444;text-align:center;background:#fafafa}' +
-        'code{background:#eee;padding:2px 6px;border-radius:3px}' +
-        '.muted{font-size:0.85em;color:#888;margin-top:1em}</style>' +
-        '<p>Opened <code>' + safePath + '</code>' + safeHeading + ' in Obsidian.</p>' +
-        '<p class="muted">You can close this tab.</p>' +
-        '<script>setTimeout(function(){try{window.close()}catch(e){}}, 100);</script>';
+        '<!doctype html><meta charset="utf-8"><title>Obsidian</title>' +
+        '<script>try{window.close()}catch(e){}' +
+        'setTimeout(function(){try{if(document.body)' +
+        'document.body.textContent="Opened in Obsidian - you can close this tab.";' +
+        '}catch(e){}},250);</script>' +
+        '<body style="margin:0;font-family:system-ui,-apple-system,sans-serif;color:#888;padding:1.25em;font-size:.9em"></body>';
 
       res
         .status(200)
@@ -224,19 +230,4 @@ export function makeOpenHandler(app: App) {
         .send('internal error: ' + ((err as Error).message || String(err)));
     }
   };
-}
-
-/**
- * Minimal HTML-entity escape for echoing the requested path back into the
- * response body. Defends against the (low-impact) reflected-XSS pathway
- * where a malicious URL like /open/<script>alert(1)</script> would inject
- * markup into the response page.
- */
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }

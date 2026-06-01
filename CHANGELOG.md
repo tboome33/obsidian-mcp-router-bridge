@@ -6,6 +6,19 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.3.1] — 2026-06-02 — quieter `/open`: native heading flash + near-invisible auto-close tab
+
+UX polish on the v0.3.0 click-to-open, validated live by Roland.
+
+### Changed
+
+- **Native scroll + heading highlight.** `?h=<heading>` navigation now opens the verified `TFile`, then scrolls via `openLinkText("#<heading>", <sourcePath>)` — a **bare-subpath** link (`#heading`, no path before the `#`) that can only resolve WITHIN the source file, so the verified-TFile guarantee from v0.3.0 holds (no cross-file re-resolution) while Obsidian applies its **native scroll + brief heading highlight**. Replaces the raw `eState.subpath` of v0.3.0, which positioned the view silently (no visual feedback — the user couldn't tell it had jumped).
+- **Near-invisible auto-close tab.** The `/open` response is now a blank page that calls `window.close()` **immediately** (before the body paints) instead of a styled card shown ~100 ms then closed. The browser blip that an http click-to-open unavoidably spawns is now contentless and as brief as the browser allows. No path is echoed anymore → the reflected-XSS surface (and the `escapeHtml` helper) is removed entirely; a minimal one-line fallback shows only if the browser refuses to self-close.
+
+### Notes
+
+- The browser tab itself can't be eliminated for an http click-to-open (the terminal won't dispatch `obsidian://`); this only minimizes its visibility. Keeping a browser window already open further downgrades the new-window pop to a background tab. `parseOpenParams` is unchanged → its 15 tests still pass.
+
 ## [0.3.0] — 2026-06-02 — `/open` heading anchors + treeview reveal
 
 Deep-linking for click-to-open. `GET /open/<path>` now accepts two optional query params so a clicked link can land on a specific section and surface the note in the file tree.
