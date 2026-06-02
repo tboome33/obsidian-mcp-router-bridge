@@ -5,8 +5,12 @@ import { parseOpenParams } from './open-params.mjs';
  * GET /open/<vault-relative-path>[?h=<heading>][&reveal=0]
  *
  * Navigates Obsidian to the specified file in the active pane. Returns a
- * tiny HTML page that auto-closes on Chrome/Edge when opened as a new
- * tab/popup (best-effort — depends on the browser's window.close policy).
+ * tiny HTML page that auto-closes after a short DELAY (~700ms). The focus
+ * dance below raises Obsidian to the front first (and it stays there), so
+ * the delayed close fires BEHIND Obsidian — invisible (no flash) — while
+ * still tidying the tab so they don't accumulate. An immediate close (the
+ * earlier behavior) flashed because it fired before Obsidian was raised,
+ * with the browser still in front.
  *
  * Optional query params (v0.3.0):
  *   - `h=<heading>` — scroll to a heading inside the note (the heading's
@@ -156,43 +160,42 @@ export function makeOpenHandler(app: App) {
         }
       }
 
-      // Best-effort window surfacing. Obsidian is Electron-based — we try
-      // multiple paths because the API surface for "bring window to front"
-      // changed across Electron versions and Obsidian doesn't expose a
-      // first-party helper for it. All attempts are wrapped in try/catch
-      // and swallowed; if none of them work, the file is still open in
-      // Obsidian and the user just needs to Alt+Tab to it.
+      // Bring Obsidian to the FRONT, over the browser tab the click-to-open
+      // just spawned. Clicking an http link foregrounds the browser; we no
+      // longer auto-close the tab (that caused a black flash), so instead we
+      // pull Obsidian back in front and let the tab park behind it. Windows
+      // blocks a background app from stealing the foreground via plain
+      // focus(), so we use the documented escape hatches:
+      // `app.focus({ steal: true })` (Electron's explicit OS-foreground steal)
+      // + a brief `setAlwaysOnTop` toggle (nudges the window to the top of the
+      // z-order). We also RE-RAISE after a short delay, because the browser
+      // re-foregrounds itself the instant it paints the response page — the
+      // delayed raise wins that race. All best-effort + swallowed; worst case
+      // the note is still open and the user Alt-Tabs to it.
       try {
         const win: any = (app as any).workspace?.containerEl?.ownerDocument?.defaultView;
-        if (win) {
-          // 1. Plain window.focus() — works in some browsers, no-op for
-          //    Electron BrowserWindows in the background.
-          if (typeof win.focus === 'function') {
-            try { win.focus(); } catch { /* ignore */ }
-          }
+        const electronRemote =
+          win?.require?.('@electron/remote') || win?.require?.('electron')?.remote;
+        const browserWindow = electronRemote?.getCurrentWindow?.();
+        const electronApp = electronRemote?.app;
 
-          // 2. Electron remote (older Electron API path, still present in
-          //    Obsidian's Electron version as of this writing).
-          try {
-            const electronRemote = win.require?.('@electron/remote');
-            const browserWindow = electronRemote?.getCurrentWindow?.();
-            if (browserWindow) {
-              try { browserWindow.show?.(); } catch { /* ignore */ }
-              try { browserWindow.focus?.(); } catch { /* ignore */ }
-              try { browserWindow.moveTop?.(); } catch { /* ignore */ }
-            }
-          } catch { /* ignore */ }
+        const raise = () => {
+          try { if (typeof win?.focus === 'function') win.focus(); } catch { /* ignore */ }
+          try { browserWindow?.show?.(); } catch { /* ignore */ }
+          try { browserWindow?.focus?.(); } catch { /* ignore */ }
+          try { browserWindow?.moveTop?.(); } catch { /* ignore */ }
+          // setAlwaysOnTop(true) then (false): forces the window above others
+          // in z-order even from the background — a reliable Windows trick.
+          try { browserWindow?.setAlwaysOnTop?.(true); } catch { /* ignore */ }
+          try { browserWindow?.setAlwaysOnTop?.(false); } catch { /* ignore */ }
+          // Electron's explicit "steal the OS foreground" API (Win/macOS).
+          try { electronApp?.focus?.({ steal: true }); } catch { /* ignore */ }
+        };
 
-          // 3. Legacy electron.remote (deprecated but sometimes still works).
-          try {
-            const legacyRemote = win.require?.('electron')?.remote;
-            const legacyWindow = legacyRemote?.getCurrentWindow?.();
-            if (legacyWindow) {
-              try { legacyWindow.show?.(); } catch { /* ignore */ }
-              try { legacyWindow.focus?.(); } catch { /* ignore */ }
-            }
-          } catch { /* ignore */ }
-        }
+        raise();
+        // Re-raise after the browser has rendered its tab (and grabbed focus).
+        // Fires in the Obsidian process AFTER this response is sent.
+        try { setTimeout(raise, 250); } catch { /* ignore */ }
       } catch {
         /* ignore */
       }
@@ -201,21 +204,22 @@ export function makeOpenHandler(app: App) {
       // browser windows opened via JS (popup-style) — not on regular
       // tab navigations. So the close attempt is best-effort; the page
       // itself remains a friendly status message.
-      // Minimal auto-close page. The browser tab is an unavoidable artifact of
-      // an http click-to-open (the terminal won't dispatch obsidian:// URIs),
-      // so make it as invisible as possible: try to close IMMEDIATELY, before
-      // the (empty) body paints — nothing flashes when the close is instant.
-      // The fallback text only fills in after a short delay IF the browser
-      // refused to self-close (a top-level navigation can't always close
-      // itself). No user input is echoed → no reflected-XSS surface, so the
-      // old path-echo + escapeHtml() are gone.
+      // Light page that auto-closes after a short DELAY. The delay is the
+      // whole trick: the focus dance above raises Obsidian to the FRONT within
+      // ~250ms (confirmed) and Obsidian STAYS front (the browser parks behind),
+      // so when this tab closes ~700ms later the close happens BEHIND Obsidian
+      // — invisible, no flash — while still cleaning the tab up so tabs don't
+      // accumulate (a real memory concern over a heavy click session). The
+      // earlier 0-100ms close flashed precisely because it fired BEFORE
+      // Obsidian was raised, with the browser still in front. No user input is
+      // echoed → no reflected-XSS surface.
       const html =
-        '<!doctype html><meta charset="utf-8"><title>Obsidian</title>' +
-        '<script>try{window.close()}catch(e){}' +
-        'setTimeout(function(){try{if(document.body)' +
-        'document.body.textContent="Opened in Obsidian - you can close this tab.";' +
-        '}catch(e){}},250);</script>' +
-        '<body style="margin:0;font-family:system-ui,-apple-system,sans-serif;color:#888;padding:1.25em;font-size:.9em"></body>';
+        '<!doctype html><meta charset="utf-8"><title>Opened in Obsidian</title>' +
+        '<style>html,body{margin:0;height:100%}body{display:flex;align-items:center;' +
+        'justify-content:center;font-family:system-ui,-apple-system,sans-serif;' +
+        'color:#666;background:#fafafa;font-size:.95rem}</style>' +
+        '<body>Opened in Obsidian.' +
+        '<script>setTimeout(function(){try{window.close()}catch(e){}},700);</script></body>';
 
       res
         .status(200)

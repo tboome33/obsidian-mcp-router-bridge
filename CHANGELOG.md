@@ -6,6 +6,19 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.3.2] — 2026-06-02 — `/open`: no flash, no tab pile-up (focus-steal + delayed close behind Obsidian)
+
+Finishes the click-to-open comfort work across several live-test rounds on Windows. The browser tab an http click-to-open spawns can't be removed (the terminal won't dispatch `obsidian://` — and even when clickable, Claude Code mangles its `&`-separated params on Windows), so the goal became: don't let it flash, don't let it pile up, and land back in Obsidian.
+
+### Changed
+
+- **Obsidian is pulled to the FRONT over the browser tab.** The window-surfacing dance now uses Electron's `app.focus({ steal: true })` + a brief `setAlwaysOnTop(true→false)` toggle, and RE-raises after ~250ms (the browser re-foregrounds itself the instant it paints the response page). Plain `focus()` can't beat the Windows foreground-lock from a background process; these can. Result: after a click, Obsidian comes back in front and stays there (the browser parks behind) instead of stranding the user in the browser.
+- **Delayed auto-close — invisible, no pile-up.** The `/open` tab now closes itself after ~700ms instead of immediately. By then Obsidian is in front, so the close fires BEHIND Obsidian — no visible flash — while still tidying the tab so they don't accumulate (a real memory concern over a heavy click session). The earlier immediate close flashed precisely because it fired *before* Obsidian was raised, with the browser still in front.
+
+### Notes
+
+- The browser PROCESS still wakes in the background on each http click (OS/terminal URL dispatch, not the plugin) — but its tabs no longer pile up. `parseOpenParams` is unchanged → its 15 tests still pass.
+
 ## [0.3.1] — 2026-06-02 — quieter `/open`: native heading flash + near-invisible auto-close tab
 
 UX polish on the v0.3.0 click-to-open, validated live by Roland.
