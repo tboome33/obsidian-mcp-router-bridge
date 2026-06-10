@@ -6,6 +6,33 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.4.0] — 2026-06-10 — presence heartbeat + public `/ping` (smart-link local-mirror detection)
+
+The bridge's half of the smart-link resolver design (see the companion vault's `smart-link-resolver.md`): one stable https link per note, resolved ON the clicking device. For that, a resolver page probes loopback ports to find a local Obsidian mirror — and needs (a) a list of candidate ports and (b) something dumb to probe. This release ships both.
+
+### Added
+
+- **`GET /ping` + `OPTIONS /ping` — public probe route.** Registered via `addPublicRoute()` exactly like `/open/*` (no Bearer token — a cross-origin `fetch` from the resolver page can't attach an Authorization header). `GET` returns `200 {"pong":true}`; `OPTIONS` returns `204`. Both carry `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Private-Network: true` (Chrome PNA preflight), `Access-Control-Allow-Methods: GET, OPTIONS`, and `Cache-Control: no-store` (a cached pong would fake presence). Anti-fingerprinting: the body is a bare pong — no vault name, no version. Loopback guard mirrored from `/open` (defense-in-depth; the resolver's probe always originates on the same device). Handlers live in a pure `src/handlers/ping.mjs` (same allowJs pattern as `open-params.mjs`) so the test suite exercises the contract verbatim on any Node.
+
+  Known caveat: Local REST API mounts a global `cors()` middleware *before* extension routers, and the `cors` package short-circuits `OPTIONS` preflights (204 + `Access-Control-Allow-Origin: *`) before our handler runs — so on current Local REST API versions the explicit `OPTIONS` handler is shadowed and the preflight response lacks the PNA header. Plain CORS preflights still succeed; Chrome 138+ uses the Local Network Access permission prompt rather than PNA-header enforcement; and the resolver cascade degrades to deep-link/streaming if a probe is blocked. The handler is registered anyway: it IS the contract, and it takes over if Local REST API ever stops swallowing `OPTIONS`.
+
+- **Presence heartbeat (`src/presence.ts` + pure helpers in `src/presence-core.mjs`).** Writes `wiki-meta/presence/<deviceId>.json` on layout-ready and every 5 minutes (`registerInterval` → cleared on unload): `{ device, vaultName, insecurePort, lastSeen, bridgeVersion }`. LiveSync replicates the file to the server-side vault copy, where the resolver reads it to learn which devices have a live local mirror and on which port to probe (freshness TTL server-side: 10 minutes = two missed beats). The path is **deliberately visible** (not a dot-folder) — Self-hosted LiveSync does not replicate hidden paths by default, and that replication is the whole point.
+
+  - `deviceId` = sanitized `os.hostname()` (`[a-z0-9-]`, ≤63 chars), falling back to a random 8-char id persisted in the plugin's saved data — so the same machine keeps the same presence file across restarts.
+  - `insecurePort` read live from the Local REST API plugin instance (`settings.insecurePort`), with its `data.json` as fallback; if neither yields a port, the beat is skipped and logged once (retried every tick — never crashes the plugin). A one-time warning also fires if `enableInsecureServer` is off (presence is still written; the probe will just fail and the cascade falls back).
+  - Failed writes (read-only vault, sync lock) are logged once and retried next tick.
+
+- **Settings tab** (the plugin's first) with one toggle: **"Presence heartbeat (smart links)"**, default ON. Turning it back on beats immediately instead of waiting up to 5 minutes.
+
+### Tests
+
+- **`tests/ping.test.mjs`** (11 tests) — the four contract headers verbatim, GET/OPTIONS status + body shape, anti-fingerprinting key set, loopback guard variants. **`tests/presence-core.test.mjs`** (12 tests) — device-id sanitization, fallback id charset, exact presence payload key set, visible-path invariant. 38 total with the 15 existing `open-params` tests.
+
+### Migration
+
+- Existing installs: pull, `npm install`, `npm run build` (deploys to `.template`), then `npm run deploy:all` and reload Obsidian once per running instance. No behavior change for existing routes. The heartbeat starts writing `wiki-meta/presence/` immediately — vaults that don't use smart links can switch the toggle off in Settings → MCP Router Bridge.
+- `package-lock.json` version backfilled (it had been stuck at 0.1.1 while `package.json` advanced to 0.3.2).
+
 ## [0.3.2] — 2026-06-02 — `/open`: no flash, no tab pile-up (focus-steal + delayed close behind Obsidian)
 
 Finishes the click-to-open comfort work across several live-test rounds on Windows. The browser tab an http click-to-open spawns can't be removed (the terminal won't dispatch `obsidian://` — and even when clickable, Claude Code mangles its `&`-separated params on Windows), so the goal became: don't let it flash, don't let it pile up, and land back in Obsidian.

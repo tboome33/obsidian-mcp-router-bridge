@@ -1,12 +1,15 @@
 # obsidian-mcp-router-bridge
 
-A minimal Obsidian community plugin that adds three REST routes to the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin:
+A minimal Obsidian community plugin that adds four REST routes to the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin:
 
 | Route | Auth | Delegates to | Used by |
 |---|---|---|---|
 | `POST /search/smart` | Bearer | [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) — semantic search via vector embeddings | `obsidian-mcp-router` `search_smart` tool |
 | `POST /templates/execute` | Bearer | [Templater](https://github.com/SilentVoid13/Templater) — render a template, optionally write to a new file | `obsidian-mcp-router` `execute_template` tool |
 | `GET /open/<path>` | **None** (loopback-only, public route) | Obsidian's `workspace.openLinkText` — navigate to a vault file | Click-to-open links from Claude Code chat / any client emitting clickable http URLs |
+| `GET /ping` | **None** (loopback-only, public route) | Nothing — returns a bare `{"pong":true}` | Smart-link resolver pages probing for a local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) |
+
+It also runs a **presence heartbeat** that advertises this device as an active local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links).
 
 ## Why this exists
 
@@ -18,9 +21,10 @@ What this plugin does **not** ship:
 - ❌ Any telemetry or remote calls
 
 What it does:
-- ✅ Three REST handlers (~250 lines total) that delegate to plugins / Obsidian APIs you already have (Smart Connections + Templater + Obsidian workspace navigation)
+- ✅ Four REST handlers that delegate to plugins / Obsidian APIs you already have (Smart Connections + Templater + Obsidian workspace navigation)
 - ✅ A `tp.mcpTools.prompt("key")` accessor inside Templater templates — used by the router to inject arguments into rendered templates
 - ✅ A no-auth loopback-only `GET /open/<path>` for clickable http links — see [Click-to-open](#click-to-open) below
+- ✅ A no-auth loopback-only `GET /ping` + a 5-minute presence heartbeat for smart-link device detection — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) below
 
 ## Install
 
@@ -102,11 +106,39 @@ curl -sk -X POST \
   "https://127.0.0.1:27124/search/smart"
 ```
 
+## Presence heartbeat + /ping (smart links)
+
+Two small pieces (v0.4.0) that let a **smart-link resolver** decide, *at click time and on the clicking device*, whether to open a note in a local Obsidian mirror or fall back to a deep link / online view:
+
+1. **Presence heartbeat.** The plugin writes `wiki-meta/presence/<deviceId>.json` once at layout-ready and every 5 minutes:
+
+   ```json
+   {
+     "device": "desktop-abc123",
+     "vaultName": "MyVault",
+     "insecurePort": 27163,
+     "lastSeen": "2026-06-10T12:00:00.000Z",
+     "bridgeVersion": "0.4.0"
+   }
+   ```
+
+   `deviceId` is the sanitized machine hostname (or a persisted random id). The file is replicated to the server-side vault copy by [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync); the resolver reads the replicated presences to learn which devices have a live mirror and which port to probe (entries older than ~10 minutes are considered stale).
+
+   **LiveSync requirements (load-bearing):** the path is deliberately **visible** — LiveSync does **not** replicate hidden (dot-prefixed) paths by default — and your LiveSync config must sync non-markdown files (`.json`) for the presence to reach the server.
+
+   Toggle: Settings → MCP Router Bridge → **"Presence heartbeat (smart links)"** (default ON). Vaults that don't use smart links can switch it off; the stale presence file then simply expires server-side.
+
+2. **`GET /ping`** — the probe target. The resolver page (an https page running on the clicking device) does `fetch('http://127.0.0.1:<port>/ping')` for each fresh presence port; the first pong wins and the page redirects to that device's `/open/<path>`. Registered as a public route (no Bearer token — a cross-origin fetch can't attach one), loopback-only like `/open`, and answering with CORS/PNA headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Private-Network: true`, `Access-Control-Allow-Methods: GET, OPTIONS`, `Cache-Control: no-store`).
+
+   **Privacy posture:** the response body is `{"pong":true}` and nothing else — no vault name, no plugin version, no port list. A prober learns only "a bridge listens on this port", which the open TCP port reveals anyway. Presence files contain no keys or secrets (device name, port, vault name, timestamp, version).
+
+   `/ping` is registered on both of Local REST API's servers, but the resolver probes the **insecure (HTTP) server** port advertised by the presence file (an https page can fetch `http://127.0.0.1` — loopback is exempt from mixed-content blocking, except on Safari where the cascade falls back as designed). So `enableInsecureServer: true` must be set in Local REST API for probes to succeed (the heartbeat warns once in the console if it isn't).
+
 ## Pre-requisites in the target vault
 
 | Plugin | Required for | Why |
 |---|---|---|
-| [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) | both routes | Provides the HTTPS server we register against |
+| [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) | all routes | Provides the HTTPS server we register against |
 | [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) | `/search/smart` only | Semantic search backend |
 | [Templater](https://github.com/SilentVoid13/Templater) | `/templates/execute` only | Template engine |
 

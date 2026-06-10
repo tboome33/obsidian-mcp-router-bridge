@@ -1,7 +1,9 @@
-import { Plugin, type PluginManifest } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, type PluginManifest } from 'obsidian';
 import { makeSearchSmartHandler } from './src/handlers/search-smart';
 import { makeTemplatesExecuteHandler } from './src/handlers/templates-execute';
 import { makeOpenHandler } from './src/handlers/open';
+import { handlePingGet, handlePingOptions } from './src/handlers/ping.mjs';
+import { PresenceManager } from './src/presence';
 
 /**
  * Local REST API public API surface (see
@@ -16,6 +18,12 @@ interface LocalRestApiRouteBuilder {
   patch: (handler: any) => void;
   delete: (handler: any) => void;
   head: (handler: any) => void;
+  /**
+   * addRoute/addPublicRoute return an Express IRoute, which also exposes
+   * .options(). Optional here because very old Local REST API builds might
+   * not — we feature-detect before using it (/ping preflight).
+   */
+  options?: (handler: any) => void;
 }
 
 interface LocalRestApiPublicApi {
@@ -54,6 +62,14 @@ interface LocalRestApiPlugin {
  *                                (loopback-only, no auth; for clickable
  *                                http links in chat/terminal contexts
  *                                where obsidian:// URIs aren't dispatched)
+ *   GET  /ping                → Bare {"pong":true} probe for the smart-link
+ *                                resolver's local-mirror detection
+ *                                (loopback-only, no auth, no data)
+ *
+ * It also runs a presence heartbeat (src/presence.ts) that writes
+ * wiki-meta/presence/<deviceId>.json every 5 minutes so a smart-link
+ * resolver can list this device as an active local mirror (the file is
+ * replicated server-side by LiveSync). Toggleable in settings, default ON.
  *
  * Self-contained: adds these routes on top of Local REST API without
  * bundling a native MCP server binary, telemetry, or any external network
@@ -64,6 +80,21 @@ interface LocalRestApiPlugin {
  * accessor are kept stable across versions so clients don't break when
  * this plugin is upgraded.
  */
+export interface McpRouterBridgeSettings {
+  /** Presence heartbeat for smart links (wiki-meta/presence/). Default ON. */
+  presenceHeartbeat: boolean;
+  /**
+   * Random device id used when os.hostname() is unavailable/unusable.
+   * Persisted so the same machine keeps the same presence file.
+   */
+  deviceIdFallback: string | null;
+}
+
+const DEFAULT_SETTINGS: McpRouterBridgeSettings = {
+  presenceHeartbeat: true,
+  deviceIdFallback: null,
+};
+
 export default class McpRouterBridgePlugin extends Plugin {
   /**
    * The scoped Local REST API public-api instance used to register our
@@ -75,7 +106,19 @@ export default class McpRouterBridgePlugin extends Plugin {
   /** Names of routes we registered. Used purely for logging on unload. */
   private registeredPaths: string[] = [];
 
+  settings: McpRouterBridgeSettings = { ...DEFAULT_SETTINGS };
+
+  presence: PresenceManager | undefined;
+
   async onload(): Promise<void> {
+    await this.loadSettings();
+    this.addSettingTab(new McpRouterBridgeSettingTab(this.app, this));
+
+    // Presence heartbeat: first beat at layout-ready (peer plugins loaded),
+    // then every 5 minutes via registerInterval (cleared on unload).
+    this.presence = new PresenceManager(this);
+    this.presence.start();
+
     // Wait for layout-ready so all peer plugins (Local REST API, Smart
     // Connections, Templater) have a chance to load before we look them up.
     this.app.workspace.onLayoutReady(() => {
@@ -111,6 +154,14 @@ export default class McpRouterBridgePlugin extends Plugin {
     }
     this.restPublicApi = undefined;
     this.registeredPaths = [];
+  }
+
+  async loadSettings(): Promise<void> {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) ?? {});
+  }
+
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
   }
 
   private registerRoutes(): void {
@@ -165,7 +216,7 @@ export default class McpRouterBridgePlugin extends Plugin {
       // no write, no execution) to keep the trust surface small.
       if (typeof publicApi.addPublicRoute !== 'function') {
         console.warn(
-          '[mcp-router-bridge] Local REST API does not expose addPublicRoute() — skipping /open/* registration. Upgrade obsidian-local-rest-api to a version that supports public (auth-less) routes.',
+          '[mcp-router-bridge] Local REST API does not expose addPublicRoute() — skipping /open/* and /ping registration. Upgrade obsidian-local-rest-api to a version that supports public (auth-less) routes.',
         );
       } else {
         publicApi.addPublicRoute('/open/*').get(openHandler);
@@ -174,6 +225,25 @@ export default class McpRouterBridgePlugin extends Plugin {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[mcp-router-bridge] Failed to register /open/*:', err);
+    }
+
+    try {
+      // /ping: the smart-link resolver's local-mirror probe. Public for the
+      // same reason as /open — a cross-origin fetch from the resolver page
+      // can't attach an Authorization header. The handler returns a bare
+      // {"pong":true} with CORS/PNA headers; see src/handlers/ping.mjs for
+      // the contract and the OPTIONS-shadowing caveat.
+      if (typeof publicApi.addPublicRoute === 'function') {
+        const pingRoute = publicApi.addPublicRoute('/ping');
+        pingRoute.get(handlePingGet);
+        if (typeof pingRoute.options === 'function') {
+          pingRoute.options(handlePingOptions);
+        }
+        this.registeredPaths.push('/ping (public, no-auth)');
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[mcp-router-bridge] Failed to register /ping:', err);
     }
 
     if (this.registeredPaths.length) {
@@ -209,5 +279,33 @@ export default class McpRouterBridgePlugin extends Plugin {
       console.error('[mcp-router-bridge] getPublicApi(manifest) threw:', err);
       return undefined;
     }
+  }
+}
+
+class McpRouterBridgeSettingTab extends PluginSettingTab {
+  constructor(
+    app: App,
+    private readonly bridgePlugin: McpRouterBridgePlugin,
+  ) {
+    super(app, bridgePlugin);
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    new Setting(containerEl)
+      .setName('Presence heartbeat (smart links)')
+      .setDesc(
+        'Write wiki-meta/presence/<device>.json every 5 minutes so smart-link resolvers can detect this device as an active local mirror.',
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.bridgePlugin.settings.presenceHeartbeat).onChange(async (value) => {
+          this.bridgePlugin.settings.presenceHeartbeat = value;
+          await this.bridgePlugin.saveSettings();
+          // Re-enabling: beat right away instead of waiting up to 5 minutes.
+          if (value) void this.bridgePlugin.presence?.beat();
+        }),
+      );
   }
 }
