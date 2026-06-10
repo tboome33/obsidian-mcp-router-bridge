@@ -179,23 +179,32 @@ export function makeOpenHandler(app: App) {
         const browserWindow = electronRemote?.getCurrentWindow?.();
         const electronApp = electronRemote?.app;
 
+        // MULTI-WINDOW FIX (Roland, 2026-06-10): with several Obsidian vaults open,
+        // the target window popped to the front then dropped BEHIND the others. Cause:
+        // setAlwaysOnTop(true) was released by an immediate (false), so the window only
+        // flashed on top before Windows re-stacked it behind whatever app held the OS
+        // foreground (another vault). Fix: HOLD alwaysOnTop for ~600ms (covering the
+        // browser's re-foreground race + the 250ms re-raise) then release ONCE, and act
+        // on THIS specific browserWindow (app.focus({steal}) is window-ambiguous across
+        // multiple windows of the same app, so window-specific ops must run LAST/win).
         const raise = () => {
-          try { if (typeof win?.focus === 'function') win.focus(); } catch { /* ignore */ }
-          try { browserWindow?.show?.(); } catch { /* ignore */ }
-          try { browserWindow?.focus?.(); } catch { /* ignore */ }
-          try { browserWindow?.moveTop?.(); } catch { /* ignore */ }
-          // setAlwaysOnTop(true) then (false): forces the window above others
-          // in z-order even from the background — a reliable Windows trick.
-          try { browserWindow?.setAlwaysOnTop?.(true); } catch { /* ignore */ }
-          try { browserWindow?.setAlwaysOnTop?.(false); } catch { /* ignore */ }
-          // Electron's explicit "steal the OS foreground" API (Win/macOS).
+          // App-level foreground steal first (Win/macOS), then window-specific ops win.
           try { electronApp?.focus?.({ steal: true }); } catch { /* ignore */ }
+          try { if (typeof win?.focus === 'function') win.focus(); } catch { /* ignore */ }
+          try { browserWindow?.setAlwaysOnTop?.(true); } catch { /* ignore */ }
+          try { browserWindow?.show?.(); } catch { /* ignore */ }   // restores if minimized
+          try { browserWindow?.moveTop?.(); } catch { /* ignore */ } // z-order to the top
+          try { browserWindow?.focus?.(); } catch { /* ignore */ }   // focus THIS window
         };
 
         raise();
         // Re-raise after the browser has rendered its tab (and grabbed focus).
-        // Fires in the Obsidian process AFTER this response is sent.
         try { setTimeout(raise, 250); } catch { /* ignore */ }
+        // Release alwaysOnTop only AFTER the contested period — the window settles ON
+        // TOP (most-recently-raised), not behind, when the hold ends.
+        try {
+          setTimeout(() => { try { browserWindow?.setAlwaysOnTop?.(false); } catch { /* ignore */ } }, 600);
+        } catch { /* ignore */ }
       } catch {
         /* ignore */
       }
