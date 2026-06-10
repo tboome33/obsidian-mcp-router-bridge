@@ -2,7 +2,7 @@ import { App, Plugin, PluginSettingTab, Setting, type PluginManifest } from 'obs
 import { makeSearchSmartHandler } from './src/handlers/search-smart';
 import { makeTemplatesExecuteHandler } from './src/handlers/templates-execute';
 import { makeOpenHandler } from './src/handlers/open';
-import { handlePingGet, handlePingOptions } from './src/handlers/ping.mjs';
+import { makePingGetHandler, handlePingOptions } from './src/handlers/ping.mjs';
 import { PresenceManager } from './src/presence';
 
 /**
@@ -64,7 +64,10 @@ interface LocalRestApiPlugin {
  *                                where obsidian:// URIs aren't dispatched)
  *   GET  /ping                → Bare {"pong":true} probe for the smart-link
  *                                resolver's local-mirror detection
- *                                (loopback-only, no auth, no data)
+ *                                (loopback-only, no auth, no data;
+ *                                optional ?v=<name> answers 404 unless
+ *                                <name> matches THIS vault — multi-vault
+ *                                disambiguation, confirmation-only)
  *
  * It also runs a presence heartbeat (src/presence.ts) that writes
  * wiki-meta/presence/<deviceId>.json every 5 minutes so a smart-link
@@ -231,11 +234,14 @@ export default class McpRouterBridgePlugin extends Plugin {
       // /ping: the smart-link resolver's local-mirror probe. Public for the
       // same reason as /open — a cross-origin fetch from the resolver page
       // can't attach an Authorization header. The handler returns a bare
-      // {"pong":true} with CORS/PNA headers; see src/handlers/ping.mjs for
+      // {"pong":true} with CORS/PNA headers; with `?v=<name>` it answers 200
+      // only if <name> matches THIS vault (404 otherwise) so a multi-vault
+      // device never pongs for the wrong vault. The vault name is injected
+      // via factory to keep the handler pure; see src/handlers/ping.mjs for
       // the contract and the OPTIONS-shadowing caveat.
       if (typeof publicApi.addPublicRoute === 'function') {
         const pingRoute = publicApi.addPublicRoute('/ping');
-        pingRoute.get(handlePingGet);
+        pingRoute.get(makePingGetHandler(() => this.app.vault.getName()));
         if (typeof pingRoute.options === 'function') {
           pingRoute.options(handlePingOptions);
         }
