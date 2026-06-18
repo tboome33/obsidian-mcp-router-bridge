@@ -67,6 +67,30 @@ https://127.0.0.1:27132/open/wiki%2Freferences%2Frouter-agents.md
 
 A click → browser GETs the URL → bridge calls `app.workspace.openLinkText` → Obsidian navigates to the file → browser tab shows a tiny "Opened in Obsidian" page that attempts to auto-close (browser-dependent).
 
+### Bring Obsidian to the front (foreground on click) — v0.5.0+
+
+By default, clicking an http `/open` link foregrounds your **browser**, not Obsidian — the note opens correctly but in the background. This is the **Windows foreground-activation lock**, not a fixable Electron quirk: a background app cannot steal the foreground from the browser that just received the click (`app.focus({steal:true})` is "give focus, never *take* it" by design; `setAlwaysOnTop`/`moveTop`/`minimize`+`restore` only reorder z-order — all empirically confirmed to fail against a freshly-clicked Chrome). The bridge always calls `flashFrame(true)` so the taskbar icon blinks, and on macOS/Linux a best-effort `app.focus()` does bring the window forward — but on Windows the only reliable, native-code-free way to foreground Obsidian is to let the **OS protocol handler** do it.
+
+**Enable it in two steps (Windows):**
+
+1. **Plugin setting** — Settings → MCP Router Bridge → **"Bring Obsidian to the front on /open (obsidian:// redirect)"** (default **OFF**, per-vault — enable it in each vault where you want foreground-on-click). When ON, the `/open` response page redirects to `obsidian://open?vault=<this-vault>` (vault-only — it just *focuses* the already-navigated window, it never re-navigates). The OS — not the background renderer — performs the activation, bypassing the foreground lock.
+
+2. **Chrome policy** — without this, Chrome shows an "Open Obsidian?" dialog on *every* click (the per-site "always allow" checkbox was removed in Chrome 77). Pre-authorize `obsidian://` from loopback origins with `AutoLaunchProtocolsFromOrigins`, set it once (no admin needed for the per-user hive), then **restart Chrome** so it loads the policy:
+
+   ```powershell
+   # Windows, per-user (HKCU). The :* wildcard covers every vault's bridge port.
+   New-Item -Path 'HKCU:\SOFTWARE\Policies\Google\Chrome' -Force | Out-Null
+   New-ItemProperty -Path 'HKCU:\SOFTWARE\Policies\Google\Chrome' `
+     -Name 'AutoLaunchProtocolsFromOrigins' -PropertyType String -Force `
+     -Value '[{"protocol":"obsidian","allowed_origins":["http://127.0.0.1:*"]}]' | Out-Null
+   ```
+
+   (Machine-wide: same value under `HKLM\…\Policies\Google\Chrome` — needs admin. Edge: `…\Policies\Microsoft\Edge`. Verify at `chrome://policy` after the restart.)
+
+   > ⚠️ **The policy is origin-scoped, not bridge-specific.** It pre-allows `obsidian://` launches from *any* `http://127.0.0.1` page in that browser profile, not just this bridge. Residual risk is low — `obsidian://` is navigation-only and any local process can already invoke it via the OS shell — but it's broader than the one route. To scope it tightly, replace `http://127.0.0.1:*` with the exact bridge origins (one per vault port, e.g. `http://127.0.0.1:27163`).
+
+With both in place, clicking a click-to-open link foregrounds Obsidian silently — zero extra clicks. Leave the setting OFF (the default) if you'd rather not set a browser policy: the note still opens in the background and the taskbar flashes.
+
 ### Security model
 
 - **Loopback-only.** Local REST API binds 127.0.0.1 by default; the handler additionally checks `req.ip` as defense-in-depth and refuses non-loopback requests.

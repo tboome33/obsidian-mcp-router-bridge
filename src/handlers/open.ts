@@ -1,16 +1,17 @@
 import type { App, TFile } from 'obsidian';
 import { parseOpenParams } from './open-params.mjs';
+import { buildOpenedHtml } from './open-html.mjs';
 
 /**
  * GET /open/<vault-relative-path>[?h=<heading>][&reveal=0]
  *
- * Navigates Obsidian to the specified file in the active pane. Returns a
- * tiny HTML page that auto-closes after a short DELAY (~700ms). The focus
- * dance below raises Obsidian to the front first (and it stays there), so
- * the delayed close fires BEHIND Obsidian — invisible (no flash) — while
- * still tidying the tab so they don't accumulate. An immediate close (the
- * earlier behavior) flashed because it fired before Obsidian was raised,
- * with the browser still in front.
+ * Navigates Obsidian to the specified file in the active pane, then returns a
+ * tiny HTML status page. Bringing Obsidian to the OS foreground from the
+ * renderer is impossible while the browser owns focus (Windows foreground
+ * lock — see the long comment by the response below); the page therefore
+ * flashes the taskbar (always) and, when the `foregroundViaProtocol` opt-in is
+ * on, hands off to `obsidian://open?vault=<name>` so the OS shell does the
+ * activation.
  *
  * Optional query params (v0.3.0):
  *   - `h=<heading>` — scroll to a heading inside the note (the heading's
@@ -38,7 +39,10 @@ import { parseOpenParams } from './open-params.mjs';
  *     in browser history / clipboard) and impractical (the browser can't
  *     attach a custom Authorization header to a click navigation).
  */
-export function makeOpenHandler(app: App) {
+export function makeOpenHandler(app: App, foregroundViaProtocol?: () => boolean) {
+  // At most one pending flashFrame-cleanup listener across rapid clicks (the
+  // window is a singleton via getCurrentWindow); reset when it fires.
+  let flashCleanupPending = false;
   return async function handleOpen(req: any, res: any): Promise<void> {
     try {
       // Defense in depth: refuse anything that's clearly not loopback.
@@ -160,75 +164,72 @@ export function makeOpenHandler(app: App) {
         }
       }
 
-      // Bring Obsidian to the FRONT, over the browser tab the click-to-open
-      // just spawned. Clicking an http link foregrounds the browser; we no
-      // longer auto-close the tab (that caused a black flash), so instead we
-      // pull Obsidian back in front and let the tab park behind it. Windows
-      // blocks a background app from stealing the foreground via plain
-      // focus(), so we use the documented escape hatches:
-      // `app.focus({ steal: true })` (Electron's explicit OS-foreground steal)
-      // + a brief `setAlwaysOnTop` toggle (nudges the window to the top of the
-      // z-order). We also RE-RAISE after a short delay, because the browser
-      // re-foregrounds itself the instant it paints the response page — the
-      // delayed raise wins that race. All best-effort + swallowed; worst case
-      // the note is still open and the user Alt-Tabs to it.
+      // Bring Obsidian to the front. INVESTIGATED 2026-06-18 (see the
+      // project-bridge "Focus-steal" note): NO in-renderer Electron call can
+      // steal the OS foreground from the browser that just received the click —
+      // it's the Windows SetForegroundWindow activation policy, not an Electron
+      // gap. `app.focus({steal:true})` is "give focus, never take it" by design
+      // (electron PR#10783); setAlwaysOnTop levels / moveTop / minimize+restore
+      // only reorder z-order; ALL were empirically confirmed to fail against a
+      // freshly-clicked Chrome. The only non-native way to actually foreground
+      // is to let the OS protocol handler do it via an `obsidian://` URI — the
+      // opt-in `foregroundViaProtocol` path in the HTML response below.
+      //
+      // Best-effort, ALWAYS: flashFrame(true) — the Windows-sanctioned signal
+      // for "this window wants attention but can't take focus" (the taskbar
+      // icon blinks; auto-cleared once Obsidian regains focus). Pure Electron,
+      // no native code, harmless and a no-op cross-platform when unsupported.
       try {
         const win: any = (app as any).workspace?.containerEl?.ownerDocument?.defaultView;
-        const electronRemote =
+        const electronRemote: any =
           win?.require?.('@electron/remote') || win?.require?.('electron')?.remote;
-        const browserWindow = electronRemote?.getCurrentWindow?.();
-        const electronApp = electronRemote?.app;
+        const browserWindow: any = electronRemote?.getCurrentWindow?.();
+        const electronApp: any = electronRemote?.app;
+        // Best-effort focus. On macOS/Linux app.focus({steal})/show()/focus()
+        // DO foreground the window; on Windows they're harmless no-ops against a
+        // foreground browser (that's the lock — hence the obsidian:// opt-in in
+        // the response below). This is NOT the old alwaysOnTop dance (removed —
+        // it only reordered z-order, never activated, and on release dropped the
+        // window BEHIND others when multiple vaults were open).
+        try { electronApp?.focus?.({ steal: true }); } catch { /* ignore */ }
+        try { browserWindow?.show?.(); } catch { /* ignore */ }
+        try { browserWindow?.focus?.(); } catch { /* ignore */ }
+        if (browserWindow) {
+          // flashFrame: the Windows-sanctioned "needs attention" signal when the
+          // foreground can't be taken (taskbar icon blinks until activation).
+          // Guard the cleanup listener so rapid clicks don't stack listeners.
+          try { browserWindow.flashFrame(true); } catch { /* ignore */ }
+          if (!flashCleanupPending) {
+            flashCleanupPending = true;
+            try {
+              browserWindow.once?.('focus', () => {
+                flashCleanupPending = false;
+                try { browserWindow.flashFrame(false); } catch { /* ignore */ }
+              });
+            } catch { flashCleanupPending = false; }
+          }
+        }
+      } catch { /* ignore */ }
 
-        // MULTI-WINDOW FIX (Roland, 2026-06-10): with several Obsidian vaults open,
-        // the target window popped to the front then dropped BEHIND the others. Cause:
-        // setAlwaysOnTop(true) was released by an immediate (false), so the window only
-        // flashed on top before Windows re-stacked it behind whatever app held the OS
-        // foreground (another vault). Fix: HOLD alwaysOnTop for ~600ms (covering the
-        // browser's re-foreground race + the 250ms re-raise) then release ONCE, and act
-        // on THIS specific browserWindow (app.focus({steal}) is window-ambiguous across
-        // multiple windows of the same app, so window-specific ops must run LAST/win).
-        const raise = () => {
-          // App-level foreground steal first (Win/macOS), then window-specific ops win.
-          try { electronApp?.focus?.({ steal: true }); } catch { /* ignore */ }
-          try { if (typeof win?.focus === 'function') win.focus(); } catch { /* ignore */ }
-          try { browserWindow?.setAlwaysOnTop?.(true); } catch { /* ignore */ }
-          try { browserWindow?.show?.(); } catch { /* ignore */ }   // restores if minimized
-          try { browserWindow?.moveTop?.(); } catch { /* ignore */ } // z-order to the top
-          try { browserWindow?.focus?.(); } catch { /* ignore */ }   // focus THIS window
-        };
-
-        raise();
-        // Re-raise after the browser has rendered its tab (and grabbed focus).
-        try { setTimeout(raise, 250); } catch { /* ignore */ }
-        // Release alwaysOnTop only AFTER the contested period — the window settles ON
-        // TOP (most-recently-raised), not behind, when the hold ends.
-        try {
-          setTimeout(() => { try { browserWindow?.setAlwaysOnTop?.(false); } catch { /* ignore */ } }, 600);
-        } catch { /* ignore */ }
-      } catch {
-        /* ignore */
-      }
-
-      // Tiny auto-closing HTML response. The window.close() works only on
-      // browser windows opened via JS (popup-style) — not on regular
-      // tab navigations. So the close attempt is best-effort; the page
-      // itself remains a friendly status message.
-      // Light page that auto-closes after a short DELAY. The delay is the
-      // whole trick: the focus dance above raises Obsidian to the FRONT within
-      // ~250ms (confirmed) and Obsidian STAYS front (the browser parks behind),
-      // so when this tab closes ~700ms later the close happens BEHIND Obsidian
-      // — invisible, no flash — while still cleaning the tab up so tabs don't
-      // accumulate (a real memory concern over a heavy click session). The
-      // earlier 0-100ms close flashed precisely because it fired BEFORE
-      // Obsidian was raised, with the browser still in front. No user input is
-      // echoed → no reflected-XSS surface.
-      const html =
-        '<!doctype html><meta charset="utf-8"><title>Opened in Obsidian</title>' +
-        '<style>html,body{margin:0;height:100%}body{display:flex;align-items:center;' +
-        'justify-content:center;font-family:system-ui,-apple-system,sans-serif;' +
-        'color:#666;background:#fafafa;font-size:.95rem}</style>' +
-        '<body>Opened in Obsidian.' +
-        '<script>setTimeout(function(){try{window.close()}catch(e){}},700);</script></body>';
+      // Response page. When `foregroundViaProtocol` is enabled (plugin setting,
+      // default OFF), the page redirects to a vault-only
+      // `obsidian://open?vault=<name>` (NO file => it only FOCUSES the
+      // already-navigated window, never re-navigates). The OS shell — not this
+      // background renderer — performs the activation, so it bypasses Windows'
+      // foreground lock entirely. OFF by default because, without a one-time
+      // Chrome `AutoLaunchProtocolsFromOrigins` policy pre-allowing obsidian://
+      // from http://127.0.0.1, Chrome shows an "Open Obsidian?" dialog on EVERY
+      // click (the per-site "always allow" checkbox was removed in Chrome 77);
+      // WITH the policy the redirect fires silently — zero extra clicks. See
+      // the README "Bring Obsidian to the front" section for the one-time setup.
+      //
+      // window.close() only works for script-opened popups, not regular tab
+      // navigations — so it's best-effort tidy-up. No request input is echoed
+      // into the page => no reflected-XSS surface.
+      const wantProtocolForeground =
+        typeof foregroundViaProtocol === 'function' ? !!foregroundViaProtocol() : false;
+      const vaultName = (app.vault as any)?.getName?.() ?? '';
+      const html = buildOpenedHtml(vaultName, wantProtocolForeground);
 
       res
         .status(200)

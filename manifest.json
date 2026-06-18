@@ -1,7 +1,7 @@
 {
   "id": "mcp-router-bridge",
   "name": "MCP Router Bridge",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "minAppVersion": "1.0.0",
   "description": "Adds /search/smart, /templates/execute, GET /open/<path>, and GET /ping REST routes to the Local REST API plugin, plus a presence heartbeat for smart-link device detection. Delegates semantic search to Smart Connections, template execution to Templater, and exposes loopback-only no-auth navigation/probe endpoints for clickable http links in chat/terminal contexts. Companion plugin for the multi-vault MCP router. No native binary, no telemetry.",
   "author": "tboome33",

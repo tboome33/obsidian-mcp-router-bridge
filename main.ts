@@ -91,11 +91,21 @@ export interface McpRouterBridgeSettings {
    * Persisted so the same machine keeps the same presence file.
    */
   deviceIdFallback: string | null;
+  /**
+   * When ON, the /open response page redirects to `obsidian://open?vault=<name>`
+   * so the OS protocol handler brings Obsidian to the foreground (no in-renderer
+   * focus call can — Windows foreground lock). Default OFF: without a one-time
+   * Chrome `AutoLaunchProtocolsFromOrigins` policy pre-allowing obsidian:// from
+   * http://127.0.0.1, Chrome prompts "Open Obsidian?" on every click. See README
+   * "Bring Obsidian to the front".
+   */
+  foregroundViaProtocol: boolean;
 }
 
 const DEFAULT_SETTINGS: McpRouterBridgeSettings = {
   presenceHeartbeat: true,
   deviceIdFallback: null,
+  foregroundViaProtocol: false,
 };
 
 export default class McpRouterBridgePlugin extends Plugin {
@@ -186,7 +196,7 @@ export default class McpRouterBridgePlugin extends Plugin {
 
     const searchHandler = makeSearchSmartHandler(this.app);
     const templatesHandler = makeTemplatesExecuteHandler(this.app);
-    const openHandler = makeOpenHandler(this.app);
+    const openHandler = makeOpenHandler(this.app, () => this.settings.foregroundViaProtocol);
 
     try {
       publicApi.addRoute('/search/smart').post(searchHandler);
@@ -311,6 +321,18 @@ class McpRouterBridgeSettingTab extends PluginSettingTab {
           await this.bridgePlugin.saveSettings();
           // Re-enabling: beat right away instead of waiting up to 5 minutes.
           if (value) void this.bridgePlugin.presence?.beat();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Bring Obsidian to the front on /open (obsidian:// redirect)')
+      .setDesc(
+        'When you click a click-to-open http link, redirect the browser to obsidian://open so the OS focuses Obsidian (no in-app focus call can — Windows foreground lock). REQUIRES a one-time Chrome policy (AutoLaunchProtocolsFromOrigins, pre-allowing obsidian:// from http://127.0.0.1) or Chrome prompts "Open Obsidian?" on every click. Off by default. See the plugin README.',
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.bridgePlugin.settings.foregroundViaProtocol).onChange(async (value) => {
+          this.bridgePlugin.settings.foregroundViaProtocol = value;
+          await this.bridgePlugin.saveSettings();
         }),
       );
   }

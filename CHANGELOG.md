@@ -6,6 +6,28 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.5.0] — 2026-06-18 — `/open` foreground via `obsidian://` opt-in + Hot Reload live-reload marker
+
+The focus-steal work of v0.3.1/v0.3.2 (`app.focus({steal})` + `setAlwaysOnTop` dance) **never actually worked on Windows** — confirmed this release across an exhaustive empirical investigation (a multi-model panel + parallel web research + headless A/B tests driving real Chrome clicks and measuring window activation). Root cause: the **Windows `SetForegroundWindow` activation policy**, not an Electron gap. A background app cannot steal the foreground from the browser that just received the click; `app.focus({steal:true})` is "give focus, never take it" by design ([electron#10783](https://github.com/electron/electron/pull/10783)), and `setAlwaysOnTop`/`moveTop`/`minimize`+`restore` only reorder z-order. The only non-native fix that works: hand off to the **OS protocol handler** via an `obsidian://` redirect.
+
+### Added
+
+- **`foregroundViaProtocol` setting (default OFF)** + Settings toggle *"Bring Obsidian to the front on /open (obsidian:// redirect)"*. When ON, the `/open` response page redirects to `obsidian://open?vault=<this-vault>` (vault-only — it just *focuses* the already-navigated window, never re-navigates). The OS shell performs the activation, bypassing the foreground lock. OFF by default because, without a one-time Chrome `AutoLaunchProtocolsFromOrigins` policy pre-allowing `obsidian://` from `http://127.0.0.1`, Chrome prompts *"Open Obsidian?"* on every click (the per-site "always allow" checkbox was removed in Chrome 77). With the policy, the redirect fires silently — zero extra clicks. Full setup (incl. the origin-scoped-policy caveat) in the README "Bring Obsidian to the front" section.
+- **`.hotreload` marker on deploy.** `deploy.mjs` now drops an empty `.hotreload` file into the deployed bridge folder so pjeby's [Hot Reload](https://github.com/pjeby/hot-reload) plugin (if installed) live-reloads the bridge whenever `main.js` changes — i.e. on every `deploy:all`, no manual "Reload app" per Obsidian instance. The marker propagates to consumer vaults via the router's `setup-vault.mjs` recursive copy. Wrapped in try/catch so a failed write degrades gracefully. (Router side — `hot-reload` added to `OPTIONAL_PLUGINS` — ships in obsidian-mcp-router v0.32.0.)
+
+### Changed
+
+- **`/open` foreground rewrite.** Removed the non-working `app.focus({steal})` + held-`setAlwaysOnTop` re-raise dance. The handler now always calls `flashFrame(true)` (the Windows-sanctioned "needs attention" taskbar blink, auto-cleared on activation; cleanup listener guarded against per-click accumulation) plus a best-effort `app.focus()`/`show()`/`focus()` that DOES foreground on macOS/Linux and is a harmless no-op on Windows. The actual Windows foreground path is the opt-in `obsidian://` redirect above.
+- **`makeOpenHandler(app, foregroundViaProtocol?)`** gained an optional getter param (back-compatible — existing call sites are unaffected).
+
+### Tests
+
+- **`tests/open-html.test.mjs` (5 tests)** — the response-HTML builder was extracted to a pure `src/handlers/open-html.mjs` (same allowJs pattern as `open-params.mjs`) so the injection-safety invariant is now covered: a hostile vault name (`</script><script>…`, quotes, backslashes) is double-encoded (`encodeURIComponent` then `JSON.stringify`) and cannot break out of the `<script>` string, plus the redirect on/off branches and nullish-name handling. 56 total (was 51).
+
+### Migration
+
+- Pull, `npm install`, `npm run build` (deploys to `.template`), then `npm run deploy:all` and reload Obsidian once per running instance (or rely on Hot Reload if installed). **To get foreground-on-click on Windows:** enable the new setting per-vault AND set the Chrome `AutoLaunchProtocolsFromOrigins` policy once, then restart Chrome — see README. No change to any existing route; the setting is OFF by default so behavior is unchanged unless you opt in.
+
 ## [0.4.0] — 2026-06-10 — presence heartbeat + public `/ping` (smart-link local-mirror detection)
 
 The bridge's half of the smart-link resolver design (see the companion vault's `smart-link-resolver.md`): one stable https link per note, resolved ON the clicking device. For that, a resolver page probes loopback ports to find a local Obsidian mirror — and needs (a) a list of candidate ports and (b) something dumb to probe. This release ships both.
@@ -36,6 +58,8 @@ The bridge's half of the smart-link resolver design (see the companion vault's `
 - `package-lock.json` version backfilled (it had been stuck at 0.1.1 while `package.json` advanced to 0.3.2).
 
 ## [0.3.2] — 2026-06-02 — `/open`: no flash, no tab pile-up (focus-steal + delayed close behind Obsidian)
+
+> **Superseded by v0.5.0.** The `app.focus({steal})` + `setAlwaysOnTop` focus-steal dance described below was empirically proven NOT to work on Windows (the `SetForegroundWindow` activation policy blocks a background app). v0.5.0 removes it and foregrounds via an `obsidian://` redirect instead. The notes below are kept as the historical record.
 
 Finishes the click-to-open comfort work across several live-test rounds on Windows. The browser tab an http click-to-open spawns can't be removed (the terminal won't dispatch `obsidian://` — and even when clickable, Claude Code mangles its `&`-separated params on Windows), so the goal became: don't let it flash, don't let it pile up, and land back in Obsidian.
 

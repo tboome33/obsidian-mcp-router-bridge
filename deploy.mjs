@@ -131,6 +131,20 @@ fs.mkdirSync(dstDir, { recursive: true });
 fs.copyFileSync(MAIN_JS, path.join(dstDir, 'main.js'));
 fs.copyFileSync(MANIFEST, path.join(dstDir, 'manifest.json'));
 
+// Drop a `.hotreload` marker so pjeby's Hot Reload plugin (if installed in the
+// consumer vault) watches this folder and live-reloads the bridge whenever
+// main.js changes on disk — i.e. on every `deploy:all`, with no manual "Reload
+// app without saving" per Obsidian instance. The marker propagates to consumer
+// vaults via setup-vault.mjs's recursive plugin copy (fs.cpSync). Harmless if
+// Hot Reload isn't installed. See the router's project-bridge "Hot Reload" note.
+try {
+  fs.writeFileSync(path.join(dstDir, '.hotreload'), '');
+} catch (err) {
+  // Non-fatal: main.js + manifest.json already copied; only the live-reload
+  // convenience is lost. Warn loudly rather than crash the deploy with a stack.
+  console.warn('\x1b[33m⚠\x1b[0m Could not write .hotreload marker (Hot Reload live-reload may not trigger): ' + err.message);
+}
+
 const mainSize = fs.statSync(MAIN_JS).size;
 ok(`Deployed ${PLUGIN_ID} to ${dstDir}`);
 info(`main.js: ${mainSize} bytes`);
