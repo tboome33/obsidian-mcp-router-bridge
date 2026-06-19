@@ -54,6 +54,15 @@ function info(msg) {
   console.log('\x1b[36mℹ\x1b[0m ' + msg);
 }
 
+// CI (GitHub Actions release build) has no local .template / router config to
+// deploy to — the build there only needs to produce main.js for the release.
+// `npm run build` runs this as a postbuild hook, so skip gracefully instead of
+// fail()-ing on the missing config. GitHub Actions sets CI=true automatically.
+if (process.env.CI) {
+  info('CI detected — skipping .template deploy (release build only).');
+  process.exit(0);
+}
+
 // 1. Verify the build is fresh
 if (!fs.existsSync(MAIN_JS)) {
   fail(`main.js not found. Run \`npm run build\` first.`);
