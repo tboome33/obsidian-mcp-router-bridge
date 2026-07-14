@@ -1,6 +1,7 @@
 import type { App, TFile } from 'obsidian';
 import { parseOpenParams } from './open-params.mjs';
 import { buildOpenedHtml } from './open-html.mjs';
+import { resolveOpenTarget } from './open-resolve.mjs';
 
 /**
  * GET /open/<vault-relative-path>[?h=<heading>][&reveal=0]
@@ -31,7 +32,10 @@ import { buildOpenedHtml } from './open-html.mjs';
  * Security:
  *   - Loopback-only (Local REST API binds 127.0.0.1; we double-check req.ip).
  *   - Path traversal refused (`..` segments, absolute paths, drive letters).
- *   - File must exist in the vault (404 otherwise).
+ *   - File must RESOLVE in the vault — either the exact path, or (if that
+ *     misses) a UNIQUE basename match found by enumerating the vault (never
+ *     escapes it). 404 when nothing matches; 409 when the basename is ambiguous
+ *     (refuses to guess). See open-resolve.mjs for the security rationale.
  *   - No auth — justified because the scope is navigation-only (no read of
  *     content, no write, no execution), the binding is loopback (other
  *     local processes can already read the vault directly), and embedding
@@ -105,15 +109,28 @@ export function makeOpenHandler(app: App, foregroundViaProtocol?: () => boolean)
         return;
       }
 
-      // Verify the file exists in the vault. getAbstractFileByPath returns
-      // TFile, TFolder, or null. We accept both files and folders — opening
-      // a folder navigates to its index (or shows the folder if there's no
-      // index) which is the natural extension.
-      const file = app.vault.getAbstractFileByPath(normalized);
-      if (!file) {
+      // Resolve which vault object opens. Exact path first (TFile/TFolder);
+      // if that misses, fall back to BASENAME resolution (like Obsidian
+      // resolves a [[wikilink]]) so a correct filename in the WRONG folder
+      // still opens the right note instead of 404 — the click-to-open URL
+      // self-heals. Returns a VERIFIED vault reference or null. Details +
+      // security rationale in open-resolve.mjs.
+      const resolved = resolveOpenTarget(app, normalized);
+      if (resolved.status === 'ambiguous') {
+        // Correct basename but it exists in MULTIPLE folders — refuse to guess
+        // (opening an arbitrary one could surface the wrong note). 409 + the
+        // candidates so the caller re-requests with the exact full path.
+        res
+          .status(409)
+          .type('text/plain')
+          .send('ambiguous basename in vault — multiple matches:\n' + resolved.candidates.join('\n'));
+        return;
+      }
+      if (resolved.status !== 'exact' && resolved.status !== 'corrected') {
         res.status(404).type('text/plain').send('file not found in vault: ' + normalized);
         return;
       }
+      const file = resolved.file;
 
       // Optional navigation params from the query string (v0.3.0):
       //   ?h=<heading>   scroll to a heading anchor inside the note
@@ -140,13 +157,14 @@ export function makeOpenHandler(app: App, foregroundViaProtocol?: () => boolean)
           // so the verified-TFile guarantee above holds. Unlike a raw
           // `eState.subpath` (which positions silently), openLinkText applies
           // Obsidian's NATIVE scroll + heading highlight — the visual feedback
-          // you get clicking a `[[note#heading]]` link. sourcePath = the path
-          // we just opened. If the heading doesn't exist, the file stays at the
-          // top — graceful degradation, never a failure.
-          await app.workspace.openLinkText('#' + heading, normalized, false);
+          // you get clicking a `[[note#heading]]` link. sourcePath = the RESOLVED
+          // file's own path (not `normalized`, which may have been a wrong-folder
+          // path corrected by basename fallback). If the heading doesn't exist,
+          // the file stays at the top — graceful degradation, never a failure.
+          await app.workspace.openLinkText('#' + heading, (file as TFile).path, false);
         }
       } else {
-        await app.workspace.openLinkText(normalized, '', false);
+        await app.workspace.openLinkText((file as { path: string }).path, '', false);
       }
 
       // Reveal the just-opened file in the file-explorer treeview (visible +

@@ -6,6 +6,15 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.5.1] — 2026-07-14 — `/open` self-heals a wrong-folder path by basename (never guesses)
+
+A click-to-open URL whose path had the right filename but the wrong folder used to 404: the handler resolved via `getAbstractFileByPath(exactPath)` (strict) and gave up. Obsidian itself resolves `[[wikilinks]]` by basename, so the same click via `obsidian://` worked while the bridge's http `/open` didn't — a confusing dead link. This closes that gap at the point of use.
+
+### Changed
+
+- **`/open/<path>` falls back to a UNIQUE basename match when the exact path misses.** New pure helper `src/handlers/open-resolve.mjs::resolveOpenTarget()`: exact path first (files + folders); on a miss, enumerate `vault.getFiles()` and keep TFiles whose leaf name matches. Exactly one → open that verified TFile (self-healing, `corrected`). Zero → 404. **Two or more → 409** with the candidate paths, listed — the bridge NEVER silently picks one (deliberately avoids `metadataCache.getFirstLinkpathDest`, which hides ambiguity by returning a "first" hit). Folders resolve by exact path only (a basename fallback across folders is too ambiguous). Security unchanged: the basename is derived from the already traversal-guarded path, the enumeration never escapes the vault, and the resolved file opens by verified reference. Heading scroll + folder open now use the RESOLVED file's own path (not the requested one). 9 unit tests in `tests/open-resolve.test.mjs`.
+- Complements obsidian-mcp-router v0.45.0, where `build_open_link` verifies the path on disk BEFORE emitting a URL (fail-closed at generation). Together: the router won't emit an unverified URL, and the bridge heals a slightly-wrong one at click time.
+
 ## [0.5.0] — 2026-06-18 — `/open` foreground via `obsidian://` opt-in + Hot Reload live-reload marker
 
 The focus-steal work of v0.3.1/v0.3.2 (`app.focus({steal})` + `setAlwaysOnTop` dance) **never actually worked on Windows** — confirmed this release across an exhaustive empirical investigation (a multi-model panel + parallel web research + headless A/B tests driving real Chrome clicks and measuring window activation). Root cause: the **Windows `SetForegroundWindow` activation policy**, not an Electron gap. A background app cannot steal the foreground from the browser that just received the click; `app.focus({steal:true})` is "give focus, never take it" by design ([electron#10783](https://github.com/electron/electron/pull/10783)), and `setAlwaysOnTop`/`moveTop`/`minimize`+`restore` only reorder z-order. The only non-native fix that works: hand off to the **OS protocol handler** via an `obsidian://` redirect.
