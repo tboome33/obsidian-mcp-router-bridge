@@ -6,6 +6,42 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.6.0] — 2026-07-30 — hide folders in the file explorer (cosmetic, per-vault)
+
+The private `wiki-meta` scaffold folder (`hot`, `catalog`, `journal`, `presence/`) is machinery, not reading material, yet it sits at the top of every vault's sidebar. This adds a setting to hide chosen folders from the file explorer — and hides them **only there**.
+
+The obvious shortcut, renaming the folder to `.wiki-meta`, is exactly what this must not do: Obsidian ignores dot-prefixed folders entirely, which makes them invisible to the Local REST API too, so the MCP router would silently lose `wiki-meta` — the folder it reads on nearly every call. The mechanism is therefore confined to a stylesheet, where the REST surface cannot observe it. (Volet ③ of the upstream `catalog-journal-et-projections-okf` decision, 2026-07-30; volets ① and ② are router-side and independent.)
+
+### Added
+
+- **`hideFoldersEnabled` (default OFF) + `hiddenFolders` (default `['wiki-meta']`) settings**, with a Settings toggle *"Hide folders in the file explorer"* and a *"Folders to hide"* textarea (one vault-relative path per line). Both live in the vault's own `data.json`, so hiding can be ON in a shared or kids' vault and OFF in working vaults with **no shared configuration**. Changes apply **instantly** — the stylesheet is recomputed on every `onChange`, no restart or reload.
+
+  Default OFF on purpose: the bridge auto-updates through BRAT, and a feature that made folders vanish from the explorer on upgrade would be a surprising, unannounced UI change in every existing vault. The list ships pre-filled so opting in is one click. Same posture as `foregroundViaProtocol` in v0.5.0.
+
+- **`src/folder-hiding.ts` — `FolderHidingManager`.** Owns a single `<style id="mcp-router-bridge-hidden-folders">` in `document.head`, whose content is recomputed from the settings. Teardown via `register()` so Obsidian drops the stylesheet on unload (without it, a disabled plugin would keep hiding folders until restart); a stale element from a previous instance is reaped before injecting, so Hot Reload can't leave duplicates. Failure posture matches the presence heartbeat: a throwing DOM call is logged, never fatal — and it fails toward *visible*, the safe direction for a cosmetic feature.
+
+- **`src/folder-hiding-core.mjs` — the pure half** (same `allowJs` pattern as `open-params.mjs`, so the test suite runs it on the Node 20 baseline): `normalizeFolderPath`, `parseFolderList`, `escapeCssStringValue`, `buildHiddenFoldersCss`.
+  - Input is normalized to the shape Obsidian actually puts in `data-path`: Windows-style `wiki-meta\presence` is folded to `/`, duplicate and leading/trailing separators are stripped, `.`/`..` segments are dropped (they can only be typos — `data-path` never contains them), and entries are deduped.
+  - The list is split on **newlines only, never commas** — `Notes, misc` is a legal Obsidian folder name, and splitting it would make that folder impossible to express.
+  - The folder list is user input that ends up **inside a CSS selector**, so it is escaped at the boundary: `"` and `\` are backslash-escaped and control characters become CSS hex escapes. Without that, `wiki"] {} body {display:none} [x="` would close the attribute value and restyle the whole app. Same encode-at-the-boundary posture as `open-html.mjs`.
+
+- **README "Settings" section** — tabulates all four settings, documents the new one (what it does *not* touch: REST API, indexing, search, graph, wikilinks, the presence heartbeat), spells out the dot-folder trap, and points at Obsidian's native **"Excluded files"** as an optional, independent complement (takes the folder out of search/graph/link suggestions; unlike a dot-folder it stays visible to the REST API, so it is safe to combine).
+
+### Tests
+
+- **`tests/folder-hiding-core.test.mjs` (29 tests)** — 94 total (was 65). Covers normalization, newline-vs-comma splitting, dedup, poisoned settings values (`null` / number / object never throw), CSS-string escaping incl. backslash-before-quote ordering, and the emitted stylesheet.
+  - Two injection tests assert the real invariant rather than a proxy: string literals are stripped from the output (honouring escapes) and the remaining *structure* must still contain exactly two rule blocks with the payload nowhere in it. Counting raw braces would have failed for the wrong reason — `{` inside a CSS string is inert.
+  - One test pins the **separate-blocks invariant**: the `:has()` selector and the row fallback must never share a rule block, because a Chromium that can't parse `:has()` discards the whole rule it appears in — which would take the fallback down on exactly the old builds that need it.
+  - Selector semantics were additionally verified against a real Chromium on a fixture replicating the explorer DOM: with `:has()` the whole subtree goes; with that rule deleted (simulating old Electron) the row fallback still hides every descendant; and the near-miss sibling `wiki-meta-archive` stays visible in both — the `^="wiki-meta/"` prefix does not over-match.
+
+### Changed
+
+- `loadSettings()` now normalizes `hiddenFolders` through `parseFolderList()` at load, so the rest of the plugin can assume a clean `string[]`: a hand-edited or sync-poisoned `data.json` could carry a bare string or `null` there, and the settings tab calls `.join()` on it. (Same defensive posture as the `deviceIdFallback` re-sanitization in v0.4.0.)
+
+### Migration
+
+- Pull, `npm install`, `npm run build` (deploys to `.template`), then `npm run deploy:all` and reload Obsidian once per running instance (or rely on Hot Reload). **No behavior changes on upgrade** — the setting is OFF by default; enable it per vault. No route, schema or presence change.
+
 ## [0.5.1] — 2026-07-14 — `/open` self-heals a wrong-folder path by basename (never guesses)
 
 A click-to-open URL whose path had the right filename but the wrong folder used to 404: the handler resolved via `getAbstractFileByPath(exactPath)` (strict) and gave up. Obsidian itself resolves `[[wikilinks]]` by basename, so the same click via `obsidian://` worked while the bridge's http `/open` didn't — a confusing dead link. This closes that gap at the point of use.

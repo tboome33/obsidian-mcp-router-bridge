@@ -4,6 +4,8 @@ import { makeTemplatesExecuteHandler } from './src/handlers/templates-execute';
 import { makeOpenHandler } from './src/handlers/open';
 import { makePingGetHandler, handlePingOptions } from './src/handlers/ping.mjs';
 import { PresenceManager } from './src/presence';
+import { FolderHidingManager } from './src/folder-hiding';
+import { DEFAULT_HIDDEN_FOLDERS, parseFolderList } from './src/folder-hiding-core.mjs';
 
 /**
  * Local REST API public API surface (see
@@ -74,6 +76,11 @@ interface LocalRestApiPlugin {
  * resolver can list this device as an active local mirror (the file is
  * replicated server-side by LiveSync). Toggleable in settings, default ON.
  *
+ * A second, unrelated convenience (src/folder-hiding.ts) can hide chosen
+ * folders in Obsidian's file explorer by injecting a CSS rule. Strictly
+ * cosmetic and per-vault: nothing is renamed, and the Local REST API — hence
+ * the MCP router reading wiki-meta — is unaffected. Default OFF.
+ *
  * Self-contained: adds these routes on top of Local REST API without
  * bundling a native MCP server binary, telemetry, or any external network
  * calls. The actual MCP server lives in the companion obsidian-mcp-router
@@ -100,12 +107,27 @@ export interface McpRouterBridgeSettings {
    * "Bring Obsidian to the front".
    */
   foregroundViaProtocol: boolean;
+  /**
+   * Master switch for the cosmetic file-explorer hiding (src/folder-hiding.ts).
+   * Default OFF on purpose: the bridge auto-updates through BRAT, and a
+   * feature that made folders vanish from the explorer on upgrade would be a
+   * surprising, unannounced UI change in every existing vault. Same posture as
+   * foregroundViaProtocol — opt in per vault.
+   */
+  hideFoldersEnabled: boolean;
+  /**
+   * Vault-relative folder paths to hide when the switch above is ON.
+   * Pre-filled with the private scaffold folder so turning it on is one click.
+   */
+  hiddenFolders: string[];
 }
 
 const DEFAULT_SETTINGS: McpRouterBridgeSettings = {
   presenceHeartbeat: true,
   deviceIdFallback: null,
   foregroundViaProtocol: false,
+  hideFoldersEnabled: false,
+  hiddenFolders: [...DEFAULT_HIDDEN_FOLDERS],
 };
 
 export default class McpRouterBridgePlugin extends Plugin {
@@ -123,6 +145,8 @@ export default class McpRouterBridgePlugin extends Plugin {
 
   presence: PresenceManager | undefined;
 
+  folderHiding: FolderHidingManager | undefined;
+
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new McpRouterBridgeSettingTab(this.app, this));
@@ -131,6 +155,12 @@ export default class McpRouterBridgePlugin extends Plugin {
     // then every 5 minutes via registerInterval (cleared on unload).
     this.presence = new PresenceManager(this);
     this.presence.start();
+
+    // Cosmetic file-explorer hiding. Applied immediately (no wait for
+    // layout-ready: the stylesheet holds whether or not the explorer is
+    // mounted yet) and torn down via register() on unload.
+    this.folderHiding = new FolderHidingManager(this);
+    this.folderHiding.start();
 
     // Wait for layout-ready so all peer plugins (Local REST API, Smart
     // Connections, Templater) have a chance to load before we look them up.
@@ -171,6 +201,12 @@ export default class McpRouterBridgePlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) ?? {});
+    // Normalize the folder list at the boundary so the rest of the plugin can
+    // assume a clean string[]: a hand-edited or sync-poisoned data.json could
+    // carry a bare string, a number, or null here, and the settings tab calls
+    // .join() on it. parseFolderList always returns an array. (Same defensive
+    // posture as the deviceIdFallback re-sanitization in src/presence.ts.)
+    this.settings.hiddenFolders = parseFolderList(this.settings.hiddenFolders);
   }
 
   async saveSettings(): Promise<void> {
@@ -335,5 +371,36 @@ class McpRouterBridgeSettingTab extends PluginSettingTab {
           await this.bridgePlugin.saveSettings();
         }),
       );
+
+    new Setting(containerEl)
+      .setName('Hide folders in the file explorer')
+      .setDesc(
+        'Hide the folders listed below from Obsidian’s file explorer. Purely cosmetic: nothing is renamed or moved, and the folders stay fully readable by Obsidian, by search and by the Local REST API — the MCP router keeps reading wiki-meta normally. Per-vault, and applied instantly. Off by default.',
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.bridgePlugin.settings.hideFoldersEnabled).onChange(async (value) => {
+          this.bridgePlugin.settings.hideFoldersEnabled = value;
+          await this.bridgePlugin.saveSettings();
+          this.bridgePlugin.folderHiding?.apply();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Folders to hide')
+      .setDesc(
+        'One vault-relative folder path per line (e.g. wiki-meta, or Archive/2024). Sub-folders and files inside them are hidden too. Only takes effect while the switch above is on.',
+      )
+      .addTextArea((text) => {
+        text.inputEl.rows = 4;
+        text.inputEl.spellcheck = false;
+        text
+          .setPlaceholder(DEFAULT_HIDDEN_FOLDERS.join('\n'))
+          .setValue(this.bridgePlugin.settings.hiddenFolders.join('\n'))
+          .onChange(async (value) => {
+            this.bridgePlugin.settings.hiddenFolders = parseFolderList(value);
+            await this.bridgePlugin.saveSettings();
+            this.bridgePlugin.folderHiding?.apply();
+          });
+      });
   }
 }

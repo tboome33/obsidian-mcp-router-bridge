@@ -9,7 +9,7 @@ A minimal Obsidian community plugin that adds four REST routes to the [Local RES
 | `GET /open/<path>` | **None** (loopback-only, public route) | Obsidian's `workspace.openLinkText` — navigate to a vault file | Click-to-open links from Claude Code chat / any client emitting clickable http URLs |
 | `GET /ping` | **None** (loopback-only, public route) | Nothing — returns a bare `{"pong":true}`; optional `?v=<vault-name>` answers 404 unless the name matches this vault | Smart-link resolver pages probing for a local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) |
 
-It also runs a **presence heartbeat** that advertises this device as an active local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links).
+It also runs a **presence heartbeat** that advertises this device as an active local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) — and can **hide chosen folders in the file explorer** (cosmetic, per-vault) — see [Settings](#settings).
 
 ## Where this sits in the stack
 
@@ -186,6 +186,57 @@ Two small pieces (v0.4.0) that let a **smart-link resolver** decide, *at click t
    **Privacy posture:** the response body is `{"pong":true}` and nothing else — no vault name, no plugin version, no port list. A prober learns only "a bridge listens on this port", which the open TCP port reveals anyway (and with `?v=`, "this port serves the vault I already named" — the 404 body is empty, nothing is echoed). Presence files contain no keys or secrets (device name, port, vault name, timestamp, version).
 
    `/ping` is registered on both of Local REST API's servers, but the resolver probes the **insecure (HTTP) server** port advertised by the presence file (an https page can fetch `http://127.0.0.1` — loopback is exempt from mixed-content blocking, except on Safari where the cascade falls back as designed). So `enableInsecureServer: true` must be set in Local REST API for probes to succeed (the heartbeat warns once in the console if it isn't).
+
+## Settings
+
+Settings → Community plugins → **MCP Router Bridge**. Every setting is stored in that vault's own `.obsidian/plugins/mcp-router-bridge/data.json`, so **it is per-vault** — nothing is shared between vaults, and the same plugin build can behave differently in each one.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Presence heartbeat (smart links)** | ON | Writes `wiki-meta/presence/<device>.json` every 5 minutes so smart-link resolvers can detect this device as a live local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) |
+| **Bring Obsidian to the front on /open** | OFF | Redirects the `/open` response page to `obsidian://` so the OS foregrounds Obsidian. Needs a one-time Chrome policy — see [Bring Obsidian to the front](#bring-obsidian-to-the-front-foreground-on-click--v050) |
+| **Hide folders in the file explorer** | OFF | Master switch for the cosmetic hiding below |
+| **Folders to hide** | `wiki-meta` | One vault-relative folder path per line |
+
+### Hide folders in the file explorer — v0.6.0+
+
+Keeps housekeeping folders out of sight in the file-explorer sidebar. Typical use: the private `wiki-meta` scaffold folder (`hot`, `catalog`, `journal`, `presence/`) is machinery you rarely open by hand, and it sits at the top of every vault.
+
+Turn on **"Hide folders in the file explorer"** and list the folders, one vault-relative path per line:
+
+```
+wiki-meta
+Archive/2024
+```
+
+The folder, its sub-folders and its files all disappear from the tree. Changes apply **instantly** — no restart, no reload. Because the setting is per-vault, hiding can be on in a shared or kids' vault and off in your working vaults, with no shared configuration.
+
+**Strictly cosmetic — and that is the whole design.** The only thing the plugin does is inject one `<style>` element (`id="mcp-router-bridge-hidden-folders"`) into the app window, keyed on the `data-path` attribute Obsidian puts on every explorer row:
+
+```css
+.nav-folder:has(> .nav-folder-title[data-path="wiki-meta"]) {
+  display: none !important;
+}
+.nav-folder-title[data-path="wiki-meta"],
+.nav-folder-title[data-path^="wiki-meta/"],
+.nav-file-title[data-path^="wiki-meta/"] {
+  display: none !important;
+}
+```
+
+Nothing else changes. The folder is **not renamed**, **not moved**, and **not dot-prefixed**, and nothing is written to the vault. So all of this keeps working exactly as before:
+
+- **The Local REST API** — and therefore `obsidian-mcp-router`, which reads `wiki-meta/hot.md`, `catalog.md` and `journal.md` on nearly every call.
+- Obsidian's **indexing**, **search**, **graph**, **quick switcher**, **backlinks** and `[[wikilinks]]`.
+- The **presence heartbeat**, which writes into `wiki-meta/presence/`.
+
+> ⚠️ **Why not just rename it `.wiki-meta`?** Because Obsidian ignores dot-prefixed folders entirely — which makes them invisible to the Local REST API too, so the MCP router would stop being able to read `wiki-meta` at all. A dot-folder is the one approach that looks equivalent and quietly breaks the whole stack. Hiding therefore lives in the stylesheet, where the REST surface cannot observe it.
+
+Two CSS rules are emitted rather than one: the `:has()` rule removes the whole subtree in one go on current Obsidian builds, and the row-by-row rule is a fallback for older Electron versions whose Chromium predates `:has()` (`minAppVersion` is 1.0.0). They are deliberately kept in **separate blocks** — a browser that can't parse `:has()` discards the entire rule containing it, so merging the selector lists would take the fallback down with it. Both paths are verified against a real Chromium; see `tests/folder-hiding-core.test.mjs`.
+
+Hiding is visual only, so a hidden folder can still be reached deliberately — via the quick switcher, search, a `[[wikilink]]`, or a click-to-open link. That is intentional: this is tidying, not access control.
+
+**Optional complement — Obsidian's native "Excluded files".** Settings → Files & Links → *Excluded files* takes the folder out of **search results, the graph and link suggestions** (it de-emphasises rather than hides, and the folder stays in the explorer). It is independent of this plugin and safe to combine: unlike a dot-folder, exclusion does not hide the folder from the Local REST API, so the router keeps working. Use the bridge setting to clear the sidebar, and "Excluded files" as well if you also want the folder out of your search results.
 
 ## Pre-requisites in the target vault
 
