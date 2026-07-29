@@ -11,9 +11,26 @@ A minimal Obsidian community plugin that adds four REST routes to the [Local RES
 
 It also runs a **presence heartbeat** that advertises this device as an active local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links).
 
+## Where this sits in the stack
+
+The bridge is one layer in a four-piece chain:
+
+```
+Obsidian  ←  Local REST API (community plugin)  ←  BRIDGE (mcp-router-bridge, this plugin)
+    ↑ HTTP per-vault (port + apiKey from the Local REST API plugin)
+MCP SERVER (obsidian-mcp-router) — Node process on the PC
+    ↑ MCP over stdio, spawned by Claude Code
+CLAUDE CODE PLUGIN (obsidian-router) — commands + skills + agents + hooks
+```
+
+- **What the bridge needs:** Obsidian + the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin. The bridge runs entirely *inside* Obsidian and registers its extra routes (`/search/smart`, `/templates/execute`, `/open/*`, `/ping` + the presence heartbeat) on Local REST API's HTTP server.
+- **Who needs the bridge:** the [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) MCP server — its `search_smart` and `execute_template` tools and its click-to-open links all land on bridge routes. That server is spawned by Claude Code: since router v0.56.1 it is shipped and launched by the `obsidian-router` Claude Code plugin (one install = everything), or hand-registered in `~/.claude.json` on dev setups.
+- **What breaks without the bridge:** smart (semantic) search, Templater execution, and clickable open-in-Obsidian links. The server's core file CRUD keeps working — those tools use Local REST API's native routes and never touch the bridge.
+- **How it updates:** via [BRAT](https://github.com/TfTHacker/obsidian42-brat) from this repo's GitHub releases (see [Install](#install)); the router's reference `.template` vault also carries a vendored copy that `setup-vault.mjs` / `npm run deploy:all` propagate to dev fleets.
+
 ## Why this exists
 
-The companion router project [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) needs two REST routes — `/search/smart` and `/templates/execute` — to expose semantic search and Templater execution as MCP tools. Local REST API doesn't ship those routes natively; this plugin adds them on top, in the smallest, most boring way possible.
+The companion router project [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) needs the REST routes Local REST API doesn't ship natively — `/search/smart`, `/templates/execute`, `GET /open/*`, `GET /ping` — to expose semantic search, Templater execution and click-to-open links through its MCP tools. This plugin adds them on top, in the smallest, most boring way possible. Without the bridge, the router's core file CRUD still works over plain Local REST API routes; smart search, Templater execution and clickable links do not.
 
 What this plugin does **not** ship:
 - ❌ Any bundled native executable
@@ -28,7 +45,12 @@ What it does:
 
 ## Install
 
-### Manual install (until accepted in the community plugins marketplace)
+### Normal path — GitHub releases via BRAT
+
+- **With `obsidian-mcp-router`** (the common case): the bridge is installed for you. `node scripts/setup-vault.mjs` provisions [BRAT](https://github.com/TfTHacker/obsidian42-brat) in the vault and downloads the bridge from this repo's GitHub releases; BRAT then keeps it auto-updated at Obsidian startup. The router's `/sync-from-github` command (router v0.55.0+) syncs one vault or the whole fleet the same way, with a BRAT anti-downgrade guard.
+- **Standalone** (no router): install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from the community plugins marketplace, then add `tboome33/obsidian-mcp-router-bridge` as a beta plugin — BRAT fetches the latest GitHub release and auto-updates it thereafter.
+
+### Manual build (dev / offline fallback)
 
 ```bash
 # 1. Build the plugin
@@ -51,7 +73,7 @@ cp main.js manifest.json "<VAULT>/.obsidian/plugins/mcp-router-bridge/"
 
 ## Click-to-open
 
-`GET /open/<vault-relative-path>` opens a file in Obsidian when hit. **No Bearer token required** — this is a `addPublicRoute()` registration (Local REST API v3.x+ feature). Designed for surfacing wiki pages from clients that emit clickable http(s) links (Claude Code CLI, browsers, etc.) where `obsidian://` URIs aren't dispatched.
+`GET /open/<vault-relative-path>` opens a file in Obsidian when hit. **No Bearer token required** — this is a `addPublicRoute()` registration (requires Local REST API ≥ 4.0.0 — see [Requirements](#requirements)). Designed for surfacing wiki pages from clients that emit clickable http(s) links (Claude Code CLI, browsers, etc.) where `obsidian://` URIs aren't dispatched.
 
 ### How to use
 
@@ -66,6 +88,11 @@ https://127.0.0.1:27132/open/wiki%2Freferences%2Frouter-agents.md
 ```
 
 A click → browser GETs the URL → bridge calls `app.workspace.openLinkText` → Obsidian navigates to the file → browser tab shows a tiny "Opened in Obsidian" page that attempts to auto-close (browser-dependent).
+
+Two optional query parameters (v0.3.0+):
+
+- `?h=<heading text>` — scroll to and highlight that heading after opening (the Obsidian-native `[[note#heading]]` behavior). Silently ignored if the heading doesn't exist. It must travel as a **query param**, never a `#fragment` — browsers strip fragments before sending the request, so the bridge would never see it.
+- `&reveal=0` — skip revealing/selecting the note in the file-explorer treeview (the reveal is ON by default).
 
 ### Bring Obsidian to the front (foreground on click) — v0.5.0+
 
@@ -96,7 +123,7 @@ With both in place, clicking a click-to-open link foregrounds Obsidian silently 
 - **Loopback-only.** Local REST API binds 127.0.0.1 by default; the handler additionally checks `req.ip` as defense-in-depth and refuses non-loopback requests.
 - **No auth.** The scope is intentionally minimal — navigation only, no content read, no write, no execution. Other processes running locally as the same user could already read the vault directly via the filesystem; this route doesn't expand their attack surface.
 - **Path traversal refused.** `..` segments, absolute paths, Windows drive letters all return 403.
-- **File must exist.** `getAbstractFileByPath` returns null → 404.
+- **Resolution contract (v0.5.1+).** Exact path first. On a miss, the handler falls back to a **unique basename match** across the vault — a correct filename in the wrong folder still opens the right note, mirroring Obsidian's own `[[wikilink]]` resolution (the fallback never escapes the vault; the resolved file is opened by verified reference). Zero matches → 404. Two or more matches → 409 listing the candidate paths — the bridge never silently picks one. Folders resolve by exact path only. See `src/handlers/open-resolve.mjs`.
 
 Why no Bearer token: a click navigation cannot attach an `Authorization` header, and embedding the token into the URL would expose it in browser history and clipboard. Localhost + minimal scope makes the unauth registration the right trade-off here.
 
@@ -107,7 +134,7 @@ Local REST API ships HTTPS with a self-signed cert by default. First click per p
 ### Requirements
 
 - `mcp-router-bridge` ≥ v0.2.0 installed and enabled in the vault.
-- Local REST API version that exposes `addPublicRoute()` (v3.x recent — if not available, the bridge logs a warning at load and skips this route; the other two routes still work normally).
+- Local REST API ≥ 4.0.0 — the version the router's `/meta-audit-bridge-readiness` command checks for; it must expose `addPublicRoute()`. If `addPublicRoute()` is unavailable, the bridge logs a warning at load and skips **both** public routes (`/open/*` and `/ping`); the two Bearer routes (`/search/smart`, `/templates/execute`) still work normally.
 
 ### Verify
 
@@ -239,44 +266,53 @@ Inside the template, the `arguments` map is exposed at:
 
 Note: **`tp.mcpTools.prompt(...)`** — accessed directly under `tp`, NOT under `tp.user` (which is the convention for Templater user scripts). Easy footgun — copy/paste from a Templater tutorial expecting `tp.user.*` won't find anything.
 
-**Response** (200):
+**Response** (200, `createFile: true`):
 
 ```jsonc
 {
   "message": "Prompt executed and file created successfully",
+  "content": "# AAPL\n\n...",
+  "path": "Trades/2026-05-03 - AAPL Long.md"  // vault path of the created file
+}
+```
+
+**Response** (200, preview mode — `createFile` absent or `false`):
+
+```jsonc
+{
+  "message": "Prompt executed without creating a file",
   "content": "# AAPL\n\n..."
 }
 ```
 
 **Errors**:
-- 400 — invalid body (missing `name`, missing `targetPath` when `createFile: true`, etc.)
+- 400 — invalid body (missing `name`, missing `targetPath` when `createFile: true`, etc.). Note that `createFile` must be a **real JSON boolean**: a stringified value like `"false"` is rejected with 400 on purpose (strings would otherwise be silently truthy).
 - 404 — template file not found in the vault
+- 409 — `{"error":"Target path already exists","summary":"..."}` — the handler refuses to overwrite an existing `targetPath`
 - 503 — Templater plugin not available, or template execution threw
 
 ## Development
 
 ```bash
 npm install
-npm run dev      # esbuild watch mode, rebuilds on file change
-npm run build    # one-shot production build (minified, no sourcemap)
-npm run deploy   # build + copy main.js + manifest.json to your reference vault's
-                 #   .obsidian/plugins/mcp-router-bridge/ folder
+npm run dev         # esbuild watch mode, rebuilds on file change
+npm run build       # tsc (type-check) + esbuild production build; the `postbuild`
+                    #   hook then auto-deploys main.js + manifest.json + a
+                    #   `.hotreload` marker to your reference vault's
+                    #   .obsidian/plugins/mcp-router-bridge/ folder
+npm run deploy      # alias of `npm run build` (build already deploys)
+npm run deploy:all  # build + propagate to every registered vault
+                    #   (runs the router's setup-vault.mjs --sync-all --force)
+npm test            # node --test tests/*.test.mjs
 ```
 
-The build emits `main.js` at the repo root. Combined with `manifest.json`, that's all Obsidian needs.
+The build emits `main.js` at the repo root. Combined with `manifest.json`, that's all Obsidian needs. The `.hotreload` marker (v0.5.0+) lets [pjeby's Hot Reload](https://github.com/pjeby/hot-reload) plugin live-reload the bridge in the reference vault after each build — no manual toggle.
 
-`npm run deploy` finds your reference vault by reading `referenceVault` from
+The deploy step finds your reference vault by reading `referenceVault` from
 `~/.claude/obsidian-mcp-router/config.json` (the [obsidian-mcp-router](https://github.com/tboome33/obsidian-mcp-router)
 config file). Set the `OBSIDIAN_TEMPLATE_VAULT` environment variable to override.
 
-After deploying, propagate to vaults that already have the plugin installed:
-
-```bash
-# For each consumer vault — re-clones plugins, preserves data.json:
-node "<obsidian-mcp-router>/scripts/setup-vault.mjs" "<vault>" --sync-plugins --force
-```
-
-Then disable+re-enable the plugin in each Obsidian instance, or run "Reload app without saving" from the command palette.
+To propagate to the rest of a dev fleet, `npm run deploy:all` does it in one command (equivalent to running `node "<obsidian-mcp-router>/scripts/setup-vault.mjs" --sync-all --force` yourself — re-clones plugins, preserves each vault's `data.json`). Then disable+re-enable the plugin in each Obsidian instance, or run "Reload app without saving" from the command palette. Consumer vaults without a dev checkout don't need any of this: they update via BRAT from GitHub releases (or the router's `/sync-from-github`) — see [Install](#install).
 
 ## License
 
