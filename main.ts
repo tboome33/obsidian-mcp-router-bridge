@@ -2,6 +2,7 @@ import { App, Plugin, PluginSettingTab, Setting, type PluginManifest } from 'obs
 import { makeSearchSmartHandler } from './src/handlers/search-smart';
 import { makeTemplatesExecuteHandler } from './src/handlers/templates-execute';
 import { makeOpenHandler } from './src/handlers/open';
+import { makeVaultCasHandler } from './src/handlers/vault-cas';
 import { makePingGetHandler, handlePingOptions } from './src/handlers/ping.mjs';
 import { PresenceManager } from './src/presence';
 import { FolderHidingManager } from './src/folder-hiding';
@@ -233,6 +234,7 @@ export default class McpRouterBridgePlugin extends Plugin {
     const searchHandler = makeSearchSmartHandler(this.app);
     const templatesHandler = makeTemplatesExecuteHandler(this.app);
     const openHandler = makeOpenHandler(this.app, () => this.settings.foregroundViaProtocol);
+    const vaultCasHandler = makeVaultCasHandler(this.app);
 
     try {
       publicApi.addRoute('/search/smart').post(searchHandler);
@@ -240,6 +242,18 @@ export default class McpRouterBridgePlugin extends Plugin {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[mcp-router-bridge] Failed to register /search/smart:', err);
+    }
+
+    try {
+      // PUT /vault-cas/* — atomic compare-and-swap write (C1). addRoute (not
+      // addPublicRoute) so Local REST API's Bearer check applies: same trust
+      // surface as core PUT /vault. Express 4 wildcard puts the vault-relative
+      // path in req.params[0]. See src/handlers/vault-cas.ts for the contract.
+      publicApi.addRoute('/vault-cas/*').put(vaultCasHandler);
+      this.registeredPaths.push('/vault-cas/* (atomic CAS write)');
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[mcp-router-bridge] Failed to register /vault-cas/*:', err);
     }
 
     try {
