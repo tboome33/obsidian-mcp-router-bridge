@@ -19,6 +19,9 @@ import {
   normalizeVaultPath,
   withCasLock,
   performCasWrite,
+  extractCasPath,
+  coerceCasBody,
+  normalizeExpectedSha,
 } from '../src/handlers/vault-cas-core.mjs';
 
 // Canonical vectors, shared verbatim with the router suite.
@@ -58,6 +61,25 @@ describe('contentSha256 (Web Crypto)', () => {
 
   test('a NON-leading U+FEFF is NOT stripped', async () => {
     assert.notEqual(await contentSha256('a﻿b'), await contentSha256('ab'));
+  });
+
+  test('pinned astral vector (surrogate pair) — MUST match router suite', async () => {
+    // 'é🙂' exercises both a BMP multibyte char and a surrogate pair.
+    assert.equal(
+      await contentSha256('é🙂'),
+      '7382f537af6a53054b6a72792df00fa0be0f5d2e8214db9cd6ebbcc3d57d02b9',
+    );
+    assert.equal(
+      await contentSha256('a🙂b'),
+      'ff39f0ecaa28603997510830e3bcd1953150e1ac44cb8637bbbcd2270112a7cd',
+    );
+  });
+
+  test('pinned LARGE-content vector — no truncation at scale (matches router suite)', async () => {
+    assert.equal(
+      await contentSha256('wiki '.repeat(10000)),
+      '37807f83aa437c33db5eeb3520550e3c0cb50b114aae97e78d8175188cbd4278',
+    );
   });
 
   test('output is always 64 lowercase hex chars', async () => {
@@ -280,5 +302,109 @@ describe('performCasWrite (read→decide→write orchestration)', () => {
     });
     assert.equal(r.status, 200, 'BOM file must be writable via the atomic tier');
     assert.equal(adapter.written['a.md'], 'replaced');
+  });
+
+  test('bytesWritten counts UTF-8 BYTES, not JS string length', async () => {
+    // 'é🙂' = 2 UTF-16 + surrogate pair = .length 3, but 2+4 = 6 UTF-8 bytes.
+    const adapter = makeAdapter({ 'a.md': 'old' });
+    const r = await performCasWrite({
+      adapter,
+      path: 'a.md',
+      expectedSha: await contentSha256('old'),
+      newContent: 'é🙂',
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.bytesWritten, 6);
+    assert.equal(
+      r.body.contentSha256,
+      '7382f537af6a53054b6a72792df00fa0be0f5d2e8214db9cd6ebbcc3d57d02b9',
+    );
+  });
+
+  test('CONCURRENCY: two CAS writes racing on the same stale token — exactly one wins', async () => {
+    // Codex finding #2: performCasWrite could drop withCasLock and the mutex
+    // test + orchestration tests would both stay green. This test pins that
+    // performCasWrite itself serializes: two concurrent writes carrying the
+    // SAME precondition; without the lock, both would read 'base' during the
+    // overlapping window and both would win (two writes, double 200).
+    const files = { 'a.md': 'base' };
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+    let writes = 0;
+    const adapter = {
+      async exists(p) {
+        return Object.prototype.hasOwnProperty.call(files, p);
+      },
+      async read(p) {
+        await delay(10); // widen the read→write window to force the overlap
+        return files[p];
+      },
+      async write(p, d) {
+        writes += 1;
+        files[p] = d;
+      },
+    };
+    const token = await contentSha256('base');
+    const [r1, r2] = await Promise.all([
+      performCasWrite({ adapter, path: 'a.md', expectedSha: token, newContent: 'winner-A' }),
+      performCasWrite({ adapter, path: 'a.md', expectedSha: token, newContent: 'winner-B' }),
+    ]);
+    const statuses = [r1.status, r2.status].sort();
+    assert.deepEqual(statuses, [200, 409], 'exactly one 200 and one 409');
+    assert.equal(writes, 1, 'exactly one adapter.write');
+    const loser = r1.status === 409 ? r1 : r2;
+    assert.equal(loser.body.reason, 'content-changed');
+    const winner = r1.status === 200 ? 'winner-A' : 'winner-B';
+    assert.equal(files['a.md'], winner, 'final content is the single winner');
+  });
+});
+
+describe('extractCasPath (request→core mapping)', () => {
+  test('prefers Express params[0] (already decoded)', () => {
+    assert.deepEqual(
+      extractCasPath({ params: ['wiki/café notes.md'], url: '/ignored' }),
+      { ok: true, rawPath: 'wiki/café notes.md' },
+    );
+  });
+  test('manual fallback: parses url, strips query, decodes', () => {
+    assert.deepEqual(
+      extractCasPath({ url: '/vault-cas/wiki/caf%C3%A9.md?x=1' }),
+      { ok: true, rawPath: 'wiki/café.md' },
+    );
+  });
+  test('malformed percent-encoding → bad-encoding', () => {
+    const r = extractCasPath({ url: '/vault-cas/bad%zz.md' });
+    assert.deepEqual(r, { ok: false, reason: 'bad-encoding' });
+  });
+  test('missing prefix → missing-path', () => {
+    assert.deepEqual(extractCasPath({ url: '/elsewhere/a.md' }), { ok: false, reason: 'missing-path' });
+    assert.deepEqual(extractCasPath({}), { ok: false, reason: 'missing-path' });
+  });
+});
+
+describe('coerceCasBody (body→content mapping)', () => {
+  test('strings pass through, including empty string', () => {
+    assert.equal(coerceCasBody('content'), 'content');
+    assert.equal(coerceCasBody(''), '');
+  });
+  test('empty-body artifacts (null/undefined/{}/[]) → empty file', () => {
+    assert.equal(coerceCasBody(null), '');
+    assert.equal(coerceCasBody(undefined), '');
+    assert.equal(coerceCasBody({}), '');
+    assert.equal(coerceCasBody([]), '');
+  });
+  test('a genuinely parsed non-empty object → null (400 body-not-text)', () => {
+    assert.equal(coerceCasBody({ a: 1 }), null);
+    assert.equal(coerceCasBody([1]), null);
+    assert.equal(coerceCasBody(42), null);
+  });
+});
+
+describe('normalizeExpectedSha (header normalization)', () => {
+  test('trims and lowercases', () => {
+    assert.equal(normalizeExpectedSha('  ABCdef0123  '), 'abcdef0123');
+  });
+  test('absent header → empty string (→ 400 bad-precondition downstream)', () => {
+    assert.equal(normalizeExpectedSha(undefined), '');
+    assert.equal(normalizeExpectedSha(null), '');
   });
 });

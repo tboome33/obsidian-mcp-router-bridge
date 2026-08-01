@@ -1,5 +1,11 @@
 import type { App } from 'obsidian';
-import { normalizeVaultPath, performCasWrite } from './vault-cas-core.mjs';
+import {
+  normalizeVaultPath,
+  performCasWrite,
+  extractCasPath,
+  coerceCasBody,
+  normalizeExpectedSha,
+} from './vault-cas-core.mjs';
 
 /**
  * PUT /vault-cas/<vault-relative-path>
@@ -54,31 +60,20 @@ import { normalizeVaultPath, performCasWrite } from './vault-cas-core.mjs';
 export function makeVaultCasHandler(app: App) {
   return async function handleVaultCas(req: any, res: any): Promise<void> {
     try {
-      // 1. Extract the vault-relative path from the '/vault-cas/*' wildcard.
-      let rawPath = '';
-      if (req.params && typeof req.params[0] === 'string') {
-        rawPath = req.params[0];
-      } else {
-        const fullPath = String(req.path || req.url || '');
-        const prefix = '/vault-cas/';
-        const idx = fullPath.indexOf(prefix);
-        if (idx === -1) {
-          res.status(400).json({ error: 'missing path', kind: 'cas_bad_request', reason: 'missing-path' });
-          return;
-        }
-        let tail = fullPath.substring(idx + prefix.length);
-        const qsIdx = tail.indexOf('?');
-        if (qsIdx !== -1) tail = tail.substring(0, qsIdx);
-        try {
-          rawPath = decodeURIComponent(tail);
-        } catch {
-          res.status(400).json({ error: 'malformed URL encoding', kind: 'cas_bad_request', reason: 'bad-encoding' });
-          return;
-        }
+      // 1. Extract the vault-relative path from the '/vault-cas/*' wildcard
+      //    (pure core — unit-tested request→core mapping).
+      const extracted = extractCasPath(req);
+      if (!extracted.ok) {
+        res.status(400).json({
+          error: extracted.reason === 'bad-encoding' ? 'malformed URL encoding' : 'missing path',
+          kind: 'cas_bad_request',
+          reason: extracted.reason,
+        });
+        return;
       }
 
       // 2. Normalize + traversal-guard (pure core).
-      const norm = normalizeVaultPath(rawPath);
+      const norm = normalizeVaultPath(extracted.rawPath);
       if (!norm.ok) {
         const status = norm.reason === 'traversal' ? 403 : 400;
         res.status(status).json({
@@ -89,24 +84,14 @@ export function makeVaultCasHandler(app: App) {
         return;
       }
 
-      // 3. Precondition header (Express lowercases header names).
-      const expectedSha = String(req.headers?.['if-match-content-sha256'] ?? '')
-        .trim()
-        .toLowerCase();
+      // 3. Precondition header (Express lowercases header names; pure core
+      //    handles absent/whitespace/uppercase forms).
+      const expectedSha = normalizeExpectedSha(req.headers?.['if-match-content-sha256']);
 
-      // 4. New content from the body. An empty text/plain body can arrive as ''
-      //    OR, depending on Local REST API's body parser, as {} / undefined when
-      //    Content-Length is 0 — all mean "empty file". Coerce those to ''.
-      //    Anything else non-string (a genuinely parsed object with keys) is a
-      //    real parser problem → 400 (the router then falls back).
-      let newContent: unknown = req.body;
-      if (newContent == null) {
-        newContent = '';
-      } else if (typeof newContent === 'object' && Object.keys(newContent as object).length === 0) {
-        // {} from an empty body → empty file.
-        newContent = '';
-      }
-      if (typeof newContent !== 'string') {
+      // 4. New content from the body (pure core: '' | null | {} | [] → empty
+      //    file; a non-empty non-string → unusable → 400, router falls back).
+      const newContent = coerceCasBody(req.body);
+      if (newContent === null) {
         res.status(400).json({
           error: 'request body must be the new file content as text',
           kind: 'cas_bad_request',

@@ -130,6 +130,65 @@ export function normalizeVaultPath(rawPath) {
 }
 
 /**
+ * Extract the vault-relative path from an Express-ish request hitting the
+ * '/vault-cas/*' wildcard. Pure — takes only the fields it reads, so the
+ * request→core mapping is unit-testable without Express. Express 4 puts the
+ * wildcard match (already URL-decoded) in req.params[0]; the manual fallback
+ * parses req.path/req.url and decodes itself.
+ *
+ * @param {{ params?: unknown[], path?: string, url?: string }} reqLike
+ * @returns {{ ok: true, rawPath: string } | { ok: false, reason: 'missing-path'|'bad-encoding' }}
+ */
+export function extractCasPath(reqLike) {
+  const params = reqLike?.params;
+  if (params && typeof params[0] === 'string') {
+    return { ok: true, rawPath: params[0] };
+  }
+  const fullPath = String(reqLike?.path || reqLike?.url || '');
+  const prefix = '/vault-cas/';
+  const idx = fullPath.indexOf(prefix);
+  if (idx === -1) return { ok: false, reason: 'missing-path' };
+  let tail = fullPath.substring(idx + prefix.length);
+  const qsIdx = tail.indexOf('?');
+  if (qsIdx !== -1) tail = tail.substring(0, qsIdx);
+  try {
+    return { ok: true, rawPath: decodeURIComponent(tail) };
+  } catch {
+    return { ok: false, reason: 'bad-encoding' };
+  }
+}
+
+/**
+ * Coerce the parsed request body into the new-file-content string. An empty
+ * text/plain body can surface as '', null/undefined, or an empty parse
+ * artifact ({} / []) depending on the body parser — all of which mean "write
+ * an empty file". A non-empty non-string means the parser genuinely produced
+ * something that is not our content → null (caller responds 400 body-not-text
+ * and the router falls back to its core-PUT tier).
+ *
+ * @param {unknown} body
+ * @returns {string|null} the content string, or null when unusable
+ */
+export function coerceCasBody(body) {
+  if (typeof body === 'string') return body;
+  if (body == null) return '';
+  if (typeof body === 'object' && Object.keys(body).length === 0) return '';
+  return null;
+}
+
+/**
+ * Normalize the If-Match-Content-Sha256 header value for comparison: absent
+ * → '', surrounding whitespace trimmed, uppercase hex folded to lowercase
+ * (digest('hex') is lowercase; we accept clients that shout).
+ *
+ * @param {unknown} headerValue
+ * @returns {string}
+ */
+export function normalizeExpectedSha(headerValue) {
+  return String(headerValue ?? '').trim().toLowerCase();
+}
+
+/**
  * Module-level serialization for the CAS critical section. The queue itself
  * never rejects, so one failed write cannot poison later ones. Mirrors the
  * renderQueue mutex in templates-execute.ts. Kept here (not in the .ts handler)
