@@ -6,6 +6,7 @@ import { makeVaultCasHandler } from './src/handlers/vault-cas';
 import { makePingGetHandler, handlePingOptions } from './src/handlers/ping.mjs';
 import { PresenceManager } from './src/presence';
 import { FolderHidingManager } from './src/folder-hiding';
+import { ConformanceManager } from './src/conformance';
 import { DEFAULT_HIDDEN_FOLDERS, parseFolderList } from './src/folder-hiding-core.mjs';
 
 /**
@@ -121,6 +122,16 @@ export interface McpRouterBridgeSettings {
    * Pre-filled with the private scaffold folder so turning it on is one click.
    */
   hiddenFolders: string[];
+  /**
+   * Open-time check that this vault's generated navigation indexes under
+   * `wiki/` are all present (src/conformance.ts). DETECTION ONLY — a Notice and
+   * a settings status line; the plugin never generates or repairs anything.
+   *
+   * Default OFF for the same reason as hideFoldersEnabled: the bridge
+   * auto-updates through BRAT, and a Notice that started appearing by itself in
+   * every existing vault after an upgrade would be an unannounced change.
+   */
+  conformanceCheckEnabled: boolean;
 }
 
 const DEFAULT_SETTINGS: McpRouterBridgeSettings = {
@@ -129,6 +140,7 @@ const DEFAULT_SETTINGS: McpRouterBridgeSettings = {
   foregroundViaProtocol: false,
   hideFoldersEnabled: false,
   hiddenFolders: [...DEFAULT_HIDDEN_FOLDERS],
+  conformanceCheckEnabled: false,
 };
 
 export default class McpRouterBridgePlugin extends Plugin {
@@ -148,6 +160,8 @@ export default class McpRouterBridgePlugin extends Plugin {
 
   folderHiding: FolderHidingManager | undefined;
 
+  conformance: ConformanceManager | undefined;
+
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new McpRouterBridgeSettingTab(this.app, this));
@@ -162,6 +176,13 @@ export default class McpRouterBridgePlugin extends Plugin {
     // mounted yet) and torn down via register() on unload.
     this.folderHiding = new FolderHidingManager(this);
     this.folderHiding.start();
+
+    // Open-time conformance check. DETECTION ONLY, default OFF, one pass at
+    // layout-ready. It reads two files at most and never writes — the router
+    // owns the single implementation of the generator (see
+    // src/conformance-core.mjs for why a second one here would be a bug).
+    this.conformance = new ConformanceManager(this);
+    this.conformance.start();
 
     // Wait for layout-ready so all peer plugins (Local REST API, Smart
     // Connections, Templater) have a chance to load before we look them up.
@@ -416,5 +437,44 @@ class McpRouterBridgeSettingTab extends PluginSettingTab {
             this.bridgePlugin.folderHiding?.apply();
           });
       });
+
+    new Setting(containerEl)
+      .setName('Check the wiki navigation indexes when this vault opens')
+      .setDesc(
+        'When this vault finishes loading, verify that the generated navigation files under wiki/ are all there (root index, one index per content folder, log, and the “generated” marker) and show a Notice if any are missing. Detection only: this plugin never creates, edits or repairs those files — the MCP router does. Reads at most two files, runs once per vault load, per-vault, off by default.',
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.bridgePlugin.settings.conformanceCheckEnabled).onChange(async (value) => {
+          this.bridgePlugin.settings.conformanceCheckEnabled = value;
+          await this.bridgePlugin.saveSettings();
+          // OFF → ON runs the check NOW, Notice included: the switch was just
+          // flipped deliberately, so waiting until the next vault load to say
+          // anything would make the setting look broken.
+          // ON → OFF drops the stored report, so the status line below cannot
+          // keep asserting something about a check that is no longer running.
+          if (value) {
+            await this.bridgePlugin.conformance?.check();
+          } else {
+            this.bridgePlugin.conformance?.forget();
+          }
+          this.display();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Navigation index status')
+      .setDesc(this.bridgePlugin.conformance?.statusLine() ?? 'Not available.')
+      .addButton((button) =>
+        button
+          .setButtonText('Re-check')
+          .setDisabled(!this.bridgePlugin.settings.conformanceCheckEnabled)
+          .onClick(async () => {
+            // The one place a repeat check is legitimate: you have just fixed
+            // something and want to see it. Everywhere else the check runs once
+            // per vault load, so it can never become Notice spam.
+            await this.bridgePlugin.conformance?.check();
+            this.display();
+          }),
+      );
   }
 }
