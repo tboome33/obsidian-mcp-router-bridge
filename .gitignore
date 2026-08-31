@@ -21,6 +21,11 @@ hot-reload.json
 # Local environment (never commit — may carry vault paths / secrets)
 .env
 
+# Session-local caches written by the router's Claude hooks (currently the
+# doc-drift detector's fingerprint). Per-machine state, meaningless in another
+# checkout, and it reappears on every session start.
+.vault-meta/
+
 # Stub files accidentally created by stray Windows redirections.
 # `>>npm install` typed in cmd creates a 0-byte "npm" file (stdout
 # redirected) and runs whatever resolves as "install" — same for git.
