@@ -1,11 +1,13 @@
 # obsidian-mcp-router-bridge
 
-A minimal Obsidian community plugin that adds four REST routes to the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin:
+A minimal Obsidian community plugin that adds six REST routes to the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin:
 
 | Route | Auth | Delegates to | Used by |
 |---|---|---|---|
 | `POST /search/smart` | Bearer | [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) — semantic search via vector embeddings | `obsidian-mcp-router` `search_smart` tool |
 | `POST /templates/execute` | Bearer | [Templater](https://github.com/SilentVoid13/Templater) — render a template, optionally write to a new file | `obsidian-mcp-router` `execute_template` tool |
+| `PUT /vault-cas/<path>` | Bearer | Obsidian's vault adapter — compare-and-swap write, refused if the file changed since you read it | `obsidian-mcp-router` writes with `ifMatch` |
+| `GET /smart-env/sources` | Bearer | Obsidian's vault adapter — serves Smart Connections' whole-note vector records, which live in a dot-directory the Local REST API will not serve | `obsidian-mcp-router` `find_twin_pages`, on a **remote** vault — see [Vector store](#vector-store-smart-envsources) |
 | `GET /open/<path>` | **None** (loopback-only, public route) | Obsidian's `workspace.openLinkText` — navigate to a vault file | Click-to-open links from Claude Code chat / any client emitting clickable http URLs |
 | `GET /ping` | **None** (loopback-only, public route) | Nothing — returns a bare `{"pong":true}`; optional `?v=<vault-name>` answers 404 unless the name matches this vault | Smart-link resolver pages probing for a local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) |
 
@@ -70,6 +72,39 @@ cp main.js manifest.json "<VAULT>/.obsidian/plugins/mcp-router-bridge/"
 ```
 
 > **Migrating from v0.1.0?** The plugin ID was renamed from `obsidian-mcp-router-bridge` to `mcp-router-bridge` in v0.1.1 to comply with Obsidian's community-plugin naming policy ("obsidian" is not allowed in plugin IDs since it's redundant). After installing v0.1.1 to the new folder, delete the legacy `<VAULT>/.obsidian/plugins/obsidian-mcp-router-bridge/` folder. Restart Obsidian. The plugin's settings (none currently) and behavior are unchanged.
+
+## Vector store (`/smart-env/sources`)
+
+`GET /smart-env/sources` — **Bearer-authenticated**, added in v0.9.0.
+
+### Why it exists
+
+[Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) keeps one vector per note under `<vault>/.smart-env/multi/`. The Local REST API does not serve dot-directories, and that is structural rather than a setting: measured on a real vault, Obsidian's own `app.vault.getFiles()` returns **zero** entries under `.smart-env`, so nothing in the core API can even see them. A plugin can, through `vault.adapter` — which is the whole reason this route lives here.
+
+It exists so the companion router's `find_twin_pages` (all-pairs cosine over a wiki) can run against a vault on **another machine**. On the machine that has the vault, the router reads the same files off disk and does not call this.
+
+### What it sends, and what it deliberately does not do
+
+The response is NDJSON: a header line, then the store's own whole-note record lines, verbatim, in sorted-filename order.
+
+```
+{"kind":"smart-env-sources","storePath":".smart-env/multi","available":true,"files":803,…}
+"smart_sources:wiki/a.md": {…},
+"smart_sources:wiki/b.md": {…},
+```
+
+**The bridge does not parse a record, resolve a tombstone, apply last-wins, choose a model, or look at a single vector.** It keeps the lines starting with `"smart_sources:` and drops the rest — which is not a guess about the format but a restatement of the consumer's own first step. All the meaning stays in one place, on the router side, so the local and remote paths cannot drift apart. Verified over 1046 store files on four vaults: parsing the full text and parsing the filtered text yield identical record maps.
+
+The filter is worth doing because the discarded lines are `smart_blocks:` chunks, which are ~96% of the bulk. On this project's vault: **166 MB on disk → 22.3 MB sent → 4.3 MB on the wire** once gzip is negotiated (it is, automatically, whenever the client advertises it).
+
+### Two contract details that matter to a client
+
+- **This route never answers 404.** A vault with no Smart Connections is an ordinary answer — a `200` whose header reads `"available": false, "reason": "store-missing"`. So a real `404` means one thing only: *the route is not there*, i.e. an older bridge. Same discipline as `/vault-cas`.
+- **Truncation is loud.** The route bounds what one request will read. If it stops early the header says `"truncated": true` with `truncatedBy`, and `filesRead` counts only the files the body actually represents. A partial store must not be mistakable for a small vault — the router refuses to compare one.
+
+### Security
+
+`addRoute`, not `addPublicRoute`: the Bearer check applies, because this returns vault-derived data and belongs behind the same key as reading the notes. **The route takes no path parameter** — the store directory is a module constant, so there is nothing to traverse out of and no guard to get wrong. That is deliberate: a general "read a dot-file" route would hand out `.obsidian/plugins/obsidian-local-rest-api/data.json`, which holds the Bearer key itself.
 
 ## Click-to-open
 

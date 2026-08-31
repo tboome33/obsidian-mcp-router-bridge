@@ -3,6 +3,7 @@ import { makeSearchSmartHandler } from './src/handlers/search-smart';
 import { makeTemplatesExecuteHandler } from './src/handlers/templates-execute';
 import { makeOpenHandler } from './src/handlers/open';
 import { makeVaultCasHandler } from './src/handlers/vault-cas';
+import { makeSmartEnvSourcesHandler } from './src/handlers/smart-env';
 import { makePingGetHandler, handlePingOptions } from './src/handlers/ping.mjs';
 import { PresenceManager } from './src/presence';
 import { FolderHidingManager } from './src/folder-hiding';
@@ -256,6 +257,7 @@ export default class McpRouterBridgePlugin extends Plugin {
     const templatesHandler = makeTemplatesExecuteHandler(this.app);
     const openHandler = makeOpenHandler(this.app, () => this.settings.foregroundViaProtocol);
     const vaultCasHandler = makeVaultCasHandler(this.app);
+    const smartEnvHandler = makeSmartEnvSourcesHandler(this.app);
 
     try {
       publicApi.addRoute('/search/smart').post(searchHandler);
@@ -275,6 +277,20 @@ export default class McpRouterBridgePlugin extends Plugin {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[mcp-router-bridge] Failed to register /vault-cas/*:', err);
+    }
+
+    try {
+      // GET /smart-env/sources — the Smart Connections vector store, which the
+      // Local REST API cannot serve because it lives in a dot-directory (and
+      // Obsidian's own file index does not carry it either: measured 0 entries
+      // under .smart-env in app.vault.getFiles()). addRoute, so the Bearer check
+      // applies — this is vault-derived data, not a navigation. The route takes
+      // NO path parameter; see src/handlers/smart-env-core.mjs.
+      publicApi.addRoute('/smart-env/sources').get(smartEnvHandler);
+      this.registeredPaths.push('/smart-env/sources');
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[mcp-router-bridge] Failed to register /smart-env/sources:', err);
     }
 
     try {

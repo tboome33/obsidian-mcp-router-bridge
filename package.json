@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp-router-bridge",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Adds /search/smart, /templates/execute, PUT /vault-cas/<path> (atomic compare-and-swap write), GET /open/<path>, and GET /ping REST routes to the Local REST API plugin, plus a presence heartbeat for smart-link device detection. Companion plugin for the multi-vault MCP router. No native binary, no telemetry.",
   "main": "main.js",
   "scripts": {

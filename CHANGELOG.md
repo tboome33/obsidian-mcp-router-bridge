@@ -6,6 +6,68 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+> **Gap, noted rather than invented:** `0.7.0` (`PUT /vault-cas`) and `0.8.0`
+> (conformance detection) shipped and are in `versions.json`, but were never
+> written up here. Reconstructing them from commits after the fact would be a
+> guess dressed as a record, so they are left missing and flagged instead.
+
+## [0.9.0] — 2026-08-31 — `GET /smart-env/sources`: the vector store the REST API refuses to serve
+
+[Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) keeps one vector per note under `<vault>/.smart-env/multi/`. The Local REST API does not serve dot-directories, so the companion router's `find_twin_pages` — all-pairs cosine over a wiki — worked only on a vault whose disk the router could reach, and answered `available: false, reason: "remote-vault"` for anything else.
+
+That refusal turns out to be **structural, not a setting**: measured on a real vault, Obsidian's own `app.vault.getFiles()` returns **zero** entries under `.smart-env`. Its file index does not carry them either. A plugin can still read them through `vault.adapter` — which is exactly why the fix belongs here and not in the router.
+
+### Added
+
+- **`GET /smart-env/sources`** (`addRoute`, so the Bearer check applies — this is vault-derived data and belongs behind the same key as reading a note). Responds NDJSON: a header line, then the store's whole-note record lines verbatim, in sorted-filename order.
+
+- **`src/handlers/smart-env-core.mjs` — the pure half**, adapter injected, so the whole contract is testable with no Obsidian at all.
+
+### The one thing this route deliberately does NOT do
+
+It does not parse a record, resolve a tombstone, apply last-wins, choose a model, or look at a vector. It keeps the lines beginning with `"smart_sources:` and drops the rest — which is not a guess about the format, but a restatement of the consumer's own first step. Every question of *meaning* stays on the router side, so the local-disk and remote paths cannot drift: they agree **by construction**, not by a parity test that only notices a divergence after someone writes it.
+
+Verified over 1046 store files on four vaults: parsing the full text and parsing the filtered text produce identical record maps — 0 divergences. And the filter earns its place, because the discarded `smart_blocks:` lines are ~96% of the bulk:
+
+| | this project's vault |
+|---|---|
+| store on disk | 166.1 MB |
+| whole-note records only | 22.3 MB |
+| **gzipped on the wire** | **4.31 MB** |
+
+Compression is negotiated (`Accept-Encoding`), never assumed, and runs **async** — the synchronous call costs ~300 ms on that payload, and this is Obsidian's UI thread.
+
+Measured end to end against the live plugin: 803 store files → 1310 records → 805 pages, and the router's disk backend and this route return **identical vectors, path for path** (0 missing, 0 differing).
+
+### Two contract rules, both borrowed from `/vault-cas`
+
+- **This route never answers 404.** A vault with no Smart Connections gets a `200` whose header says `"available": false, "reason": "store-missing"`. That leaves `404` meaning exactly one thing — *the route is absent*, i.e. an older bridge — which the router reports as `bridge-route-absent` with something the operator can actually do.
+- **Truncation is loud.** The route bounds one request and the header carries `truncated` + `truncatedBy` when it bites. `filesRead` counts only files the body actually represents — not files whose bytes were fetched and then discarded. A first draft got that wrong and reported `filesRead === files` beside `truncated: true`, a contradiction the reader had no way to resolve; the test that caught it is now the one that pins it.
+
+### Three budgets, because they bound different things
+
+| budget | default | bounds |
+|---|---|---|
+| `maxBytes` | 64 MB | the RESPONSE |
+| `maxReadBytes` | 512 MB | what passes through the renderer's memory to build it |
+| `maxFiles` | 20 000 | files ATTEMPTED |
+
+They are not interchangeable, and review round 2 found each of the first drafts of them wrong in a different way. The response budget says nothing about what was read: the filter discards ~96% of every file, so 22 MB sent cost 166 MB read. Both were measured in `string.length` — UTF-16 code units, not the bytes they are stated in, which on a fleet full of accented vault paths is a budget that quietly lets through more than it promises. And `maxFiles` guarded on `filesRead`, which only advances on success, so a directory of unreadable entries was walked in full while the header said `truncated: false` — a runaway guard that guarded nothing.
+
+`maxReadBytes` is documented as a **floor-stop**: it is checked before the next read, so the total can overshoot by at most one file. It cannot be tighter, because a file's size is not known until it has been read.
+
+### The header is a claim, and the consumer checks it
+
+`recordLines` and `bytes` are exact, because the router verifies both against the body that actually arrived and refuses (`store-inconsistent`) on a mismatch. That is what catches a body cut mid-record: the truncated line still starts with the prefix, so a line count alone would not notice. The producer's `bytes` was off by one at first — `segments.join('\n')` puts n−1 newlines between n segments, not n — which the consumer's check would have rejected on every single valid response.
+
+### Security
+
+The route **takes no path parameter** — the store directory is a module constant, so there is nothing to traverse out of and no guard to get wrong. That is the point: a general "read a dot-file" route would hand out `.obsidian/plugins/obsidian-local-rest-api/data.json`, which holds the Bearer key itself.
+
+### Tests
+
+`tests/smart-env-core.test.mjs` — 17 cases covering the anchored prefix test (against block records that *contain* the marker in their own payload), sorted read order, the header's inertness to the consumer's parser, unreadable files counted but never fatal, all three truncation modes landing on a file boundary, byte-exact accounting on a multi-byte fixture, the file guard stopping actual read attempts, and the balance `filesRead + unreadableFiles === files` on an untruncated read.
+
 ## [0.6.0] — 2026-07-30 — hide folders in the file explorer (cosmetic, per-vault)
 
 The private `wiki-meta` scaffold folder (`hot`, `catalog`, `journal`, `presence/`) is machinery, not reading material, yet it sits at the top of every vault's sidebar. This adds a setting to hide chosen folders from the file explorer — and hides them **only there**.
