@@ -179,9 +179,11 @@ export default class McpRouterBridgePlugin extends Plugin {
     this.folderHiding.start();
 
     // Open-time conformance check. DETECTION ONLY, default OFF, one pass at
-    // layout-ready. It reads two files at most and never writes — the router
-    // owns the single implementation of the generator (see
-    // src/conformance-core.mjs for why a second one here would be a bug).
+    // layout-ready. It reads every expected projection present (root index,
+    // log, one index.md per ancestor folder — bounded, 8 reads in flight) and
+    // never writes — the router owns the single implementation of the
+    // generator (see src/conformance-core.mjs for why a second one here would
+    // be a bug).
     this.conformance = new ConformanceManager(this);
     this.conformance.start();
 
@@ -457,7 +459,7 @@ class McpRouterBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Check the wiki navigation indexes when this vault opens')
       .setDesc(
-        'When this vault finishes loading, verify that the generated navigation files under wiki/ are all there (root index, one index per content folder, log, and the “generated” marker) and show a Notice if any are missing. Detection only: this plugin never creates, edits or repairs those files — the MCP router does. Reads at most two files, runs once per vault load, per-vault, off by default.',
+        'When this vault finishes loading, verify that the generated navigation files under wiki/ are all there (root index, one index per content folder, log, and the “generated” marker) and show a Notice if any are missing. Detection only: this plugin never creates, edits or repairs those files — the MCP router does. Reads only those navigation files (a few at a time, never your notes), runs once per vault load, per-vault, off by default.',
       )
       .addToggle((toggle) =>
         toggle.setValue(this.bridgePlugin.settings.conformanceCheckEnabled).onChange(async (value) => {
