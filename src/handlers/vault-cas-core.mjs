@@ -109,6 +109,17 @@ export function decideCasWrite({ expectedSha, currentSha }) {
  * refuses one write; a false negative on a WRITE route could escape the vault,
  * so err strict.
  *
+ * ALSO rejects any dot-prefixed segment (`.obsidian/...`, `.smart-env/...`,
+ * a bare `.env`, etc.). Obsidian's own vault index ignores dot-folders
+ * entirely (see folder-hiding-core.mjs) — they are never real vault content,
+ * only Obsidian's own admin state or a plugin's private store. This route
+ * writes through `app.vault.adapter`, which — unlike the index — does NOT
+ * ignore them, so without this check a caller could reach
+ * `.obsidian/plugins/obsidian-local-rest-api/data.json`, the Bearer key file
+ * itself. smart-env.ts's route sits behind the identical risk and closes it
+ * by taking no path parameter at all; this route accepts an arbitrary path,
+ * so the guard closes it here instead (found + fixed 2026-09-04).
+ *
  * @param {string} rawPath — the already-URL-decoded wildcard segment
  * @returns {{ ok: true, path: string } | { ok: false, reason: 'missing-path'|'traversal' }}
  */
@@ -122,7 +133,8 @@ export function normalizeVaultPath(rawPath) {
     path.startsWith('/') ||
     path.startsWith('..') ||
     /(^|\/)\.\.(\/|$)/.test(path) ||
-    /^[A-Za-z]:/.test(path)
+    /^[A-Za-z]:/.test(path) ||
+    /(^|\/)\.[^/]*(\/|$)/.test(path)
   ) {
     return { ok: false, reason: 'traversal' };
   }

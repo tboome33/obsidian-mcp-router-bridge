@@ -170,6 +170,36 @@ describe('normalizeVaultPath (traversal guard)', () => {
     assert.deepEqual(normalizeVaultPath(''), { ok: false, reason: 'missing-path' });
     assert.deepEqual(normalizeVaultPath(null), { ok: false, reason: 'missing-path' });
   });
+  // Obsidian ignores dot-prefixed folders entirely (folder-hiding-core.mjs) —
+  // they are never real vault content, only ever Obsidian's OWN admin state
+  // (.obsidian/) or a plugin's private store (.smart-env/). The traversal
+  // guard let a leading-dot segment straight through, so this CAS route could
+  // overwrite .obsidian/plugins/obsidian-local-rest-api/data.json — the
+  // Bearer key file itself — via app.vault.adapter, which (unlike Obsidian's
+  // own vault index) does not ignore dot-folders. smart-env.ts's route sits
+  // behind the same risk and closes it by taking NO path parameter at all;
+  // this route accepts an arbitrary path, so the guard must close it instead.
+  test('rejects a path with any dot-prefixed segment (.obsidian, .smart-env, etc.)', () => {
+    for (const p of [
+      '.obsidian/plugins/obsidian-local-rest-api/data.json',
+      '.smart-env/multi/foo.ajson',
+      'wiki/.obsidian/x.md',
+      'a/.hidden/b.md',
+      '.git/config',
+    ]) {
+      const r = normalizeVaultPath(p);
+      assert.equal(r.ok, false, `expected ${p} rejected`);
+      assert.equal(r.reason, 'traversal');
+    }
+  });
+  test('a leaf filename that merely starts with a dot but has no dot SEGMENT is still fine to reject the same way (no special-casing)', () => {
+    // Documents the chosen posture: the guard is segment-based, not
+    // leaf-only, so `wiki/.env` is refused exactly like `.env` at the root —
+    // consistent, not selectively permissive.
+    const r = normalizeVaultPath('wiki/.env');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'traversal');
+  });
 });
 
 describe('withCasLock (serialization mutex)', () => {
