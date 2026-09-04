@@ -6,6 +6,22 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 Nothing pending right now.
 
+## [0.9.1] — 2026-09-04 — `PUT /vault-cas/*` stops taking dot-prefixed paths
+
+### Security
+
+`normalizeVaultPath`, the traversal guard behind the atomic compare-and-swap write route (`PUT /vault-cas/*`, shipped in an earlier version), refused `..`, an absolute path, and a Windows drive letter — but let a leading-dot path segment straight through. This route writes via `app.vault.adapter`, which — unlike Obsidian's own vault index — does **not** ignore dot-prefixed folders. A caller holding the Bearer token could reach `.obsidian/plugins/obsidian-local-rest-api/data.json`: the file that holds the Bearer key itself, in a route built to accept arbitrary vault-relative writes.
+
+The 0.9.0 entry above documents that the neighboring `/smart-env/sources` route sits behind the identical risk, and closes it by taking no path parameter at all — its own comment names the exact file this would have exposed. `/vault-cas/*` accepts an arbitrary path by design, so it could not take the same shortcut; the guard now blocks any segment starting with a dot instead.
+
+No legitimate vault content is affected. Obsidian's own file index ignores dot-prefixed folders entirely — nothing under one was ever real, reachable vault content through the ordinary REST API to begin with.
+
+Found while evaluating, for an unrelated feature discussion in the companion router, whether this route could safely carry file writes beyond ordinary notes. Fixed the same day, with a test that reproduces the exposure before the fix and passes after it.
+
+### Added
+
+- A guarded test in `tests/vault-cas-core.test.mjs`: `.obsidian/...`, `.smart-env/...`, and a bare `.env` are all refused with `reason: 'traversal'`, both at the root and nested under an ordinary folder.
+
 ## [0.9.0] — 2026-08-31 — `GET /smart-env/sources`: the vector store the REST API refuses to serve
 
 [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) keeps one vector per note under `<vault>/.smart-env/multi/`. The Local REST API does not serve dot-directories, so the companion router's `find_twin_pages` — all-pairs cosine over a wiki — worked only on a vault whose disk the router could reach, and answered `available: false, reason: "remote-vault"` for anything else.
