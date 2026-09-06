@@ -4,7 +4,13 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 ## [Unreleased]
 
-Nothing pending right now.
+### Fixed
+
+- **The release workflow no longer gives up when the release already exists — 0.9.1 shipped with no assets because of it.** `.github/workflows/release.yml` ended in a single `gh release create "$tag" … main.js manifest.json`. When a release for the tag had already been created by hand (the habit here: `git push --tags`, then a `gh release create` with a descriptive title, moments before the runner reaches that step), the command aborted with *"a release with the same tag name already exists"*, the step failed, and **the built assets were never uploaded**. The hand-made release stayed on GitHub carrying `assets: []`, so BRAT answered *"A manifest.json file does not exist in the latest release of the repository"* on every vault following the plugin, at every startup.
+
+  The step is now idempotent: create the release only if it is absent, then always `gh release upload … --clobber` the artifacts built from *this* tag. Two guards were added around it — one refusing to publish when `main.js` or `manifest.json` is missing or empty, one asserting after the fact that the release carries exactly those two assets. The second is the one that would have caught this: the job failed loudly for 0.8.0, 0.9.0 **and** 0.9.1 without anyone noticing, because the first two happened to have their assets attached by the hand-made release and looked fine from outside.
+
+  Release `0.9.1` has been repaired in place — `main.js` + `manifest.json` rebuilt from tag `0.9.1` and attached. The binary was *not* copied from 0.9.0: 0.9.1 carries a real security fix, and 0.9.0's bundle does not contain the guard.
 
 ## [0.9.1] — 2026-09-04 — `PUT /vault-cas/*` stops taking dot-prefixed paths
 

@@ -44,18 +44,62 @@ jobs:
           fi
           echo "Tag and manifest agree on version $tag"
 
-      - name: Create GitHub Release
+      - name: Verify build artifacts exist
+        # Cheap guard: never publish a release whose assets are missing or empty.
+        run: |
+          for f in main.js manifest.json; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Build artifact '$f' is missing or empty — refusing to release"
+              exit 1
+            fi
+            echo "$f: $(wc -c < "$f") bytes"
+          done
+
+      - name: Publish release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # IDEMPOTENT ON PURPOSE. A release for this tag may already exist — a human
+        # (or an agent) often creates it by hand with a descriptive title moments
+        # after `git push --tags`, racing this job. That is exactly what broke 0.9.1
+        # (2026-09-04): the old single `gh release create … main.js manifest.json`
+        # aborted with "a release with the same tag name already exists", the step
+        # failed, and the hand-made release stayed on GitHub with assets = [] — so
+        # BRAT reported "no manifest.json in the latest release" on every vault that
+        # follows the plugin. 0.8.0 and 0.9.0 hit the same failure but happened to
+        # have their assets attached by hand, which hid the bug for two releases.
+        #
+        # So: create the release only if it is absent, then ALWAYS upload the freshly
+        # built assets with --clobber. Whoever won the race, CI has the last word on
+        # what the binaries are — and they are always built from this tag, never
+        # copied from a previous one.
+        #
         # Published immediately — do NOT add --draft: setup-vault.mjs's
         # downloadBridgePlugin() hits releases/latest/download/ and BRAT both require a
         # PUBLISHED (non-draft, non-prerelease) release; a draft would silently freeze
-        # them on the previous version. Re-tagging is unsupported: `gh release create`
-        # fails if the tag's release already exists — to re-ship, bump the version
-        # (npm run version) and push a NEW tag; never delete + re-push an existing tag.
+        # them on the previous version. To re-ship, bump the version (npm run version)
+        # and push a NEW tag; never delete + re-push an existing tag.
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title="$tag" \
-            --notes="Automated release for $tag. See CHANGELOG.md for details." \
-            main.js manifest.json
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists — uploading built assets over it."
+          else
+            echo "Creating release $tag."
+            gh release create "$tag" \
+              --title="$tag" \
+              --notes="Automated release for $tag. See CHANGELOG.md for details."
+          fi
+          gh release upload "$tag" main.js manifest.json --clobber
+
+      - name: Verify the release carries both assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The whole point of this workflow is that BRAT finds main.js + manifest.json
+        # attached to the release. Assert it instead of assuming it.
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          assets=$(gh release view "$tag" --json assets --jq '[.assets[].name] | sort | join(",")')
+          echo "Assets on $tag: ${assets:-<none>}"
+          if [ "$assets" != "main.js,manifest.json" ]; then
+            echo "::error::Release $tag does not carry exactly main.js + manifest.json — BRAT would fail"
+            exit 1
+          fi
