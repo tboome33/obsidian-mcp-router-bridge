@@ -8,8 +8,8 @@ A minimal Obsidian community plugin that adds six REST routes to the [Local REST
 | `POST /templates/execute` | Bearer | [Templater](https://github.com/SilentVoid13/Templater) — render a template, optionally write to a new file | `obsidian-mcp-router` `execute_template` tool |
 | `PUT /vault-cas/<path>` | Bearer | Obsidian's vault adapter — compare-and-swap write, refused if the file changed since you read it | `obsidian-mcp-router` writes with `ifMatch` |
 | `GET /smart-env/sources` | Bearer | Obsidian's vault adapter — serves Smart Connections' whole-note vector records, which live in a dot-directory the Local REST API will not serve | `obsidian-mcp-router` `find_twin_pages`, on a **remote** vault — see [Vector store](#vector-store-smart-envsources) |
-| `GET /open/<path>` | **None** (loopback-only, public route) | Obsidian's `workspace.openLinkText` — navigate to a vault file | Click-to-open links from Claude Code chat / any client emitting clickable http URLs |
-| `GET /ping` | **None** (loopback-only, public route) | Nothing — returns a bare `{"pong":true}`; optional `?v=<vault-name>` answers 404 unless the name matches this vault | Smart-link resolver pages probing for a local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) |
+| `GET /mcp-router-bridge/open/<path>` (also `GET /open/<path>` on Local REST API 4.x) | **None** (loopback-only, public route) | Obsidian's `workspace.openLinkText` — navigate to a vault file | Click-to-open links from Claude Code chat / any client emitting clickable http URLs — see [Click-to-open](#click-to-open) |
+| `GET /ping` | **None** (loopback-only, public route) | Nothing — returns `{"pong":true,"openPrefix":"/mcp-router-bridge/open/"}` (`openPrefix` = the click-to-open route actually registered); optional `?v=<vault-name>` answers 404 unless the name matches this vault | Smart-link resolver pages probing for a local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) |
 
 It also runs a **presence heartbeat** that advertises this device as an active local mirror — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) — and can **hide chosen folders in the file explorer** (cosmetic, per-vault) — see [Settings](#settings).
 
@@ -25,14 +25,14 @@ MCP SERVER (obsidian-mcp-router) — Node process on the PC
 CLAUDE CODE PLUGIN (obsidian-router) — commands + skills + agents + hooks
 ```
 
-- **What the bridge needs:** Obsidian + the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin. The bridge runs entirely *inside* Obsidian and registers its extra routes (`/search/smart`, `/templates/execute`, `/open/*`, `/ping` + the presence heartbeat) on Local REST API's HTTP server.
+- **What the bridge needs:** Obsidian + the [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin. The bridge runs entirely *inside* Obsidian and registers its extra routes (`/search/smart`, `/templates/execute`, `/mcp-router-bridge/open/*`, `/ping` + the presence heartbeat) on Local REST API's HTTP server.
 - **Who needs the bridge:** the [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) MCP server — its `search_smart` and `execute_template` tools and its click-to-open links all land on bridge routes. That server is spawned by Claude Code: since router v0.56.1 it is shipped and launched by the `obsidian-router` Claude Code plugin (one install = everything), or hand-registered in `~/.claude.json` on dev setups.
 - **What breaks without the bridge:** smart (semantic) search, Templater execution, and clickable open-in-Obsidian links. The server's core file CRUD keeps working — those tools use Local REST API's native routes and never touch the bridge.
 - **How it updates:** via [BRAT](https://github.com/TfTHacker/obsidian42-brat) from this repo's GitHub releases (see [Install](#install)); the router's reference `.template` vault also carries a vendored copy that `setup-vault.mjs` / `npm run deploy:all` propagate to dev fleets.
 
 ## Why this exists
 
-The companion router project [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) needs the REST routes Local REST API doesn't ship natively — `/search/smart`, `/templates/execute`, `GET /open/*`, `GET /ping` — to expose semantic search, Templater execution and click-to-open links through its MCP tools. This plugin adds them on top, in the smallest, most boring way possible. Without the bridge, the router's core file CRUD still works over plain Local REST API routes; smart search, Templater execution and clickable links do not.
+The companion router project [`obsidian-mcp-router`](https://github.com/tboome33/obsidian-mcp-router) needs the REST routes Local REST API doesn't ship natively — `/search/smart`, `/templates/execute`, `GET /mcp-router-bridge/open/*`, `GET /ping` — to expose semantic search, Templater execution and click-to-open links through its MCP tools. This plugin adds them on top, in the smallest, most boring way possible. Without the bridge, the router's core file CRUD still works over plain Local REST API routes; smart search, Templater execution and clickable links do not.
 
 What this plugin does **not** ship:
 - ❌ Any bundled native executable
@@ -42,7 +42,7 @@ What this plugin does **not** ship:
 What it does:
 - ✅ Four REST handlers that delegate to plugins / Obsidian APIs you already have (Smart Connections + Templater + Obsidian workspace navigation)
 - ✅ A `tp.mcpTools.prompt("key")` accessor inside Templater templates — used by the router to inject arguments into rendered templates
-- ✅ A no-auth loopback-only `GET /open/<path>` for clickable http links — see [Click-to-open](#click-to-open) below
+- ✅ A no-auth loopback-only `GET /mcp-router-bridge/open/<path>` for clickable http links — see [Click-to-open](#click-to-open) below
 - ✅ A no-auth loopback-only `GET /ping` + a 5-minute presence heartbeat for smart-link device detection — see [Presence heartbeat + /ping](#presence-heartbeat--ping-smart-links) below
 
 ## Install
@@ -108,18 +108,29 @@ The filter is worth doing because the discarded lines are `smart_blocks:` chunks
 
 ## Click-to-open
 
-`GET /open/<vault-relative-path>` opens a file in Obsidian when hit. **No Bearer token required** — this is a `addPublicRoute()` registration (requires Local REST API ≥ 4.0.0 — see [Requirements](#requirements)). Designed for surfacing wiki pages from clients that emit clickable http(s) links (Claude Code CLI, browsers, etc.) where `obsidian://` URIs aren't dispatched.
+`GET /mcp-router-bridge/open/<vault-relative-path>` opens a file in Obsidian when hit. **No Bearer token required** — this is a `addPublicRoute()` registration (requires Local REST API ≥ 4.0.0 — see [Requirements](#requirements)). Designed for surfacing wiki pages from clients that emit clickable http(s) links (Claude Code CLI, browsers, etc.) where `obsidian://` URIs aren't dispatched.
+
+### Route prefix — `/mcp-router-bridge/open/` (v0.10.0+)
+
+Up to v0.9.1 the route was `GET /open/<path>`. **Local REST API 5.4.0 reserves eight top-level prefixes for its own routes** (`vault`, `active`, `search`, `commands`, `events`, `mcp`, `open`, `tags`) and its `addPublicRoute()` throws for any public route whose first segment is one of them. On 5.4.0, `/open/*` therefore never registered; worse, 5.4.0 ships its own *authenticated* `/open/*`, so a click on an old-style link answered **401** (`errorCode 40101`) instead of opening the note.
+
+Since v0.10.0 the bridge registers, in this order:
+
+1. `GET /mcp-router-bridge/open/*` — under the plugin's own id, the namespace Local REST API recommends for public routes. Works on every Local REST API version.
+2. `GET /open/*` — the historical route, kept for Local REST API 4.x (where it still registers) so links built by an older router keep working there. On 5.4.0 it is refused; the bridge logs one `console.info` line and moves on.
+
+The prefix that actually registered first is announced by [`GET /ping`](#presence-heartbeat--ping-smart-links) as `openPrefix`, so a client never has to guess which Local REST API a vault runs. Clients fall back to `/open/` when `openPrefix` is absent (bridge < 0.10.0). The companion router does exactly that for `clickToOpenUrl` and `build_open_link`.
 
 ### How to use
 
 ```
-https://127.0.0.1:<port>/open/<URL-encoded-vault-path>
+http://127.0.0.1:<insecurePort>/mcp-router-bridge/open/<URL-encoded-vault-path>
 ```
 
-Example for `wiki/references/router-agents.md` in a vault whose Local REST API runs on port 27132:
+Example for `wiki/references/router-agents.md` in a vault whose Local REST API HTTP server runs on port 27132:
 
 ```
-https://127.0.0.1:27132/open/wiki%2Freferences%2Frouter-agents.md
+http://127.0.0.1:27132/mcp-router-bridge/open/wiki%2Freferences%2Frouter-agents.md
 ```
 
 A click → browser GETs the URL → bridge calls `app.workspace.openLinkText` → Obsidian navigates to the file → browser tab shows a tiny "Opened in Obsidian" page that attempts to auto-close (browser-dependent).
@@ -169,7 +180,8 @@ Local REST API ships HTTPS with a self-signed cert by default. First click per p
 ### Requirements
 
 - `mcp-router-bridge` ≥ v0.2.0 installed and enabled in the vault.
-- Local REST API ≥ 4.0.0 — the version the router's `/meta-audit-bridge-readiness` command checks for; it must expose `addPublicRoute()`. If `addPublicRoute()` is unavailable, the bridge logs a warning at load and skips **both** public routes (`/open/*` and `/ping`); the two Bearer routes (`/search/smart`, `/templates/execute`) still work normally.
+- Local REST API ≥ 4.0.0 — the version the router's `/meta-audit-bridge-readiness` command checks for; it must expose `addPublicRoute()`. If `addPublicRoute()` is unavailable, the bridge logs a warning at load and skips **both** public routes (click-to-open and `/ping`); the Bearer routes (`/search/smart`, `/templates/execute`, …) still work normally.
+- Local REST API 5.4.0+ needs bridge ≥ v0.10.0 for click-to-open — see [Route prefix](#route-prefix--mcp-router-bridgeopen-v0100).
 
 ### Verify
 
@@ -214,11 +226,13 @@ Two small pieces (v0.4.0) that let a **smart-link resolver** decide, *at click t
 
    Toggle: Settings → MCP Router Bridge → **"Presence heartbeat (smart links)"** (default ON). Vaults that don't use smart links can switch it off; the stale presence file then simply expires server-side.
 
-2. **`GET /ping`** — the probe target. The resolver page (an https page running on the clicking device) does `fetch('http://127.0.0.1:<port>/ping')` for each fresh presence port; the first pong wins and the page redirects to that device's `/open/<path>`. Registered as a public route (no Bearer token — a cross-origin fetch can't attach one), loopback-only like `/open`, and answering with CORS/PNA headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Private-Network: true`, `Access-Control-Allow-Methods: GET, OPTIONS`, `Cache-Control: no-store`).
+2. **`GET /ping`** — the probe target. The resolver page (an https page running on the clicking device) does `fetch('http://127.0.0.1:<port>/ping')` for each fresh presence port; the first pong wins and the page opens the note through that device's click-to-open route (`openPrefix` from the pong, `/open/` when absent). Registered as a public route (no Bearer token — a cross-origin fetch can't attach one), loopback-only like `/open`, and answering with CORS/PNA headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Private-Network: true`, `Access-Control-Allow-Methods: GET, OPTIONS`, `Cache-Control: no-store`).
 
    **Vault confirmation — optional `?v=<vault-name>`.** On a multi-vault device, every vault runs its own bridge on its own port, and a candidate port from the presence files can belong to a *different* vault than the one the link targets — a blind pong would make the resolver open the wrong note. Probing with `?v=<vault-name>` (URL-encoded) makes the pong vault-aware: the route answers `200 {"pong":true}` only if the URL-decoded name **strictly equals** this vault's name (`app.vault.getName()`), and `404` otherwise — with the same four headers, so the resolver's CORS fetch can read the status either way. Without `?v`, behavior is unchanged (bare pong). This is a *confirmation* semantic, not disclosure: the route never reveals its vault name, it only confirms a name the requester already knows (it came from the presence file / the link itself).
 
-   **Privacy posture:** the response body is `{"pong":true}` and nothing else — no vault name, no plugin version, no port list. A prober learns only "a bridge listens on this port", which the open TCP port reveals anyway (and with `?v=`, "this port serves the vault I already named" — the 404 body is empty, nothing is echoed). Presence files contain no keys or secrets (device name, port, vault name, timestamp, version).
+   **`openPrefix` (v0.10.0+).** The pong also carries `openPrefix`, the path prefix of the click-to-open route this bridge actually registered — `/mcp-router-bridge/open/` normally, `/open/` on a host that only accepted the legacy route; the key is omitted if neither registered. Build the link as `http://127.0.0.1:<port><openPrefix><URL-encoded path>`, and fall back to `/open/` when the key is absent. See [Route prefix](#route-prefix--mcp-router-bridgeopen-v0100).
+
+   **Privacy posture:** the response body is `{"pong":true}` plus `openPrefix` and nothing else — no vault name, no plugin version, no port list. `openPrefix` is a constant of the plugin naming a route that answers anyone who tries it, so it discloses nothing a prober could not learn by requesting that path. A prober learns only "a bridge listens on this port", which the open TCP port reveals anyway (and with `?v=`, "this port serves the vault I already named" — the 404 body is empty, nothing is echoed). Presence files contain no keys or secrets (device name, port, vault name, timestamp, version).
 
    `/ping` is registered on both of Local REST API's servers, but the resolver probes the **insecure (HTTP) server** port advertised by the presence file (an https page can fetch `http://127.0.0.1` — loopback is exempt from mixed-content blocking, except on Safari where the cascade falls back as designed). So `enableInsecureServer: true` must be set in Local REST API for probes to succeed (the heartbeat warns once in the console if it isn't).
 

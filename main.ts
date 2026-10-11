@@ -5,6 +5,7 @@ import { makeOpenHandler } from './src/handlers/open';
 import { makeVaultCasHandler } from './src/handlers/vault-cas';
 import { makeSmartEnvSourcesHandler } from './src/handlers/smart-env';
 import { makePingGetHandler, handlePingOptions } from './src/handlers/ping.mjs';
+import { registerOpenRoutes } from './src/handlers/open-routes.mjs';
 import { PresenceManager } from './src/presence';
 import { FolderHidingManager } from './src/folder-hiding';
 import { ConformanceManager } from './src/conformance';
@@ -35,7 +36,8 @@ interface LocalRestApiPublicApi {
   addRoute: (path: string) => LocalRestApiRouteBuilder;
   /**
    * Register a route that bypasses Local REST API's Bearer-token check.
-   * Used here for GET /open/* — see security analysis in
+   * Used here for GET /mcp-router-bridge/open/* (+ legacy /open/*) and
+   * /ping — see security analysis in
    * src/handlers/open.ts (scope = navigation-only, loopback-only,
    * no read/write access to content).
    */
@@ -63,12 +65,18 @@ interface LocalRestApiPlugin {
  *
  *   POST /search/smart        → Smart Connections semantic search
  *   POST /templates/execute   → Templater template execution
- *   GET  /open/<path>         → Navigate Obsidian to a vault file
+ *   GET  /mcp-router-bridge/open/<path>
+ *                             → Navigate Obsidian to a vault file
  *                                (loopback-only, no auth; for clickable
  *                                http links in chat/terminal contexts
- *                                where obsidian:// URIs aren't dispatched)
- *   GET  /ping                → Bare {"pong":true} probe for the smart-link
- *                                resolver's local-mirror detection
+ *                                where obsidian:// URIs aren't dispatched).
+ *                                Also served at the legacy /open/<path>
+ *                                where Local REST API still allows it (4.x);
+ *                                5.4.0 reserves /open/ — see open-routes.mjs
+ *   GET  /ping                → {"pong":true,"openPrefix":…} probe for the
+ *                                smart-link resolver's local-mirror detection;
+ *                                openPrefix names the click-to-open route
+ *                                actually registered
  *                                (loopback-only, no auth, no data;
  *                                optional ?v=<name> answers 404 unless
  *                                <name> matches THIS vault — multi-vault
@@ -155,6 +163,13 @@ export default class McpRouterBridgePlugin extends Plugin {
   /** Names of routes we registered. Used purely for logging on unload. */
   private registeredPaths: string[] = [];
 
+  /**
+   * Prefix of the click-to-open route that actually registered
+   * (`/mcp-router-bridge/open/`, or `/open/` on a host that only took the
+   * legacy one), null if none did. Announced in GET /ping's `openPrefix`.
+   */
+  private openPrefix: string | null = null;
+
   settings: McpRouterBridgeSettings = { ...DEFAULT_SETTINGS };
 
   presence: PresenceManager | undefined;
@@ -202,6 +217,7 @@ export default class McpRouterBridgePlugin extends Plugin {
       this.app.workspace.on('obsidian-local-rest-api:loaded', () => {
         this.restPublicApi = undefined;
         this.registeredPaths = [];
+        this.openPrefix = null;
         this.registerRoutes();
       }),
     );
@@ -222,6 +238,7 @@ export default class McpRouterBridgePlugin extends Plugin {
     }
     this.restPublicApi = undefined;
     this.registeredPaths = [];
+    this.openPrefix = null;
   }
 
   async loadSettings(): Promise<void> {
@@ -303,30 +320,46 @@ export default class McpRouterBridgePlugin extends Plugin {
       console.error('[mcp-router-bridge] Failed to register /templates/execute:', err);
     }
 
-    try {
-      // Express 4 wildcard: '/open/*' matches anything under /open/, with
-      // the matched portion in req.params[0]. See src/handlers/open.ts
-      // for the security analysis (loopback-only, path traversal guards,
-      // navigation-scope, justified no-auth).
-      //
-      // We use addPublicRoute (not addRoute) so Local REST API skips its
-      // Bearer-token check for this endpoint. A click navigation from a
-      // browser cannot attach an Authorization header, and embedding the
-      // API key into the URL would expose it in browser history and
-      // clipboard — so unauth here is mandatory, not a convenience. The
-      // scope is intentionally minimal (navigation only, no content read,
-      // no write, no execution) to keep the trust surface small.
-      if (typeof publicApi.addPublicRoute !== 'function') {
-        console.warn(
-          '[mcp-router-bridge] Local REST API does not expose addPublicRoute() — skipping /open/* and /ping registration. Upgrade obsidian-local-rest-api to a version that supports public (auth-less) routes.',
-        );
-      } else {
-        publicApi.addPublicRoute('/open/*').get(openHandler);
-        this.registeredPaths.push('/open/* (public, no-auth)');
+    // Click-to-open. Express 4 wildcard: '<base>/*' matches anything under
+    // <base>/, with the matched portion in req.params[0]. See
+    // src/handlers/open.ts for the security analysis (loopback-only, path
+    // traversal guards, navigation-scope, justified no-auth).
+    //
+    // We use addPublicRoute (not addRoute) so Local REST API skips its
+    // Bearer-token check for this endpoint. A click navigation from a
+    // browser cannot attach an Authorization header, and embedding the
+    // API key into the URL would expose it in browser history and
+    // clipboard — so unauth here is mandatory, not a convenience. The
+    // scope is intentionally minimal (navigation only, no content read,
+    // no write, no execution) to keep the trust surface small.
+    //
+    // Two bases, in order: /mcp-router-bridge/open/* (the plugin-id
+    // namespace, accepted by every Local REST API) then the legacy /open/*
+    // (accepted by 4.x, REFUSED by 5.4.0, which reserves /open/ for its own
+    // authenticated route — see src/handlers/open-routes.mjs). The first one
+    // that registers is announced in GET /ping's `openPrefix`.
+    if (typeof publicApi.addPublicRoute !== 'function') {
+      console.warn(
+        '[mcp-router-bridge] Local REST API does not expose addPublicRoute() — skipping click-to-open and /ping registration. Upgrade obsidian-local-rest-api to a version that supports public (auth-less) routes.',
+      );
+    } else {
+      const open = registerOpenRoutes(publicApi.addPublicRoute.bind(publicApi), openHandler);
+      this.openPrefix = open.openPrefix;
+      for (const path of open.registered) {
+        this.registeredPaths.push(`${path} (public, no-auth)`);
       }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('[mcp-router-bridge] Failed to register /open/*:', err);
+      for (const { path, message } of open.refused) {
+        if (open.openPrefix !== null) {
+          // Expected on Local REST API 5.4.0 for the legacy /open/*: another
+          // route already serves click-to-open, so this is a note, not a
+          // failure.
+          // eslint-disable-next-line no-console
+          console.info(`[mcp-router-bridge] Route ${path} not registered (${message}); click-to-open is served at ${open.openPrefix}*.`);
+        } else {
+          // eslint-disable-next-line no-console
+          console.error(`[mcp-router-bridge] Failed to register ${path}: ${message}`);
+        }
+      }
     }
 
     try {
@@ -340,7 +373,12 @@ export default class McpRouterBridgePlugin extends Plugin {
       // the contract and the OPTIONS-shadowing caveat.
       if (typeof publicApi.addPublicRoute === 'function') {
         const pingRoute = publicApi.addPublicRoute('/ping');
-        pingRoute.get(makePingGetHandler(() => this.app.vault.getName()));
+        pingRoute.get(
+          makePingGetHandler(
+            () => this.app.vault.getName(),
+            () => this.openPrefix,
+          ),
+        );
         if (typeof pingRoute.options === 'function') {
           pingRoute.options(handlePingOptions);
         }

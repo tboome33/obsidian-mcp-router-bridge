@@ -4,7 +4,10 @@ import { buildOpenedHtml } from './open-html.mjs';
 import { resolveOpenTarget } from './open-resolve.mjs';
 
 /**
- * GET /open/<vault-relative-path>[?h=<heading>][&reveal=0]
+ * GET /mcp-router-bridge/open/<vault-relative-path>[?h=<heading>][&reveal=0]
+ * (also served at the legacy GET /open/<path> where Local REST API still
+ * accepts that public route — 4.x; 5.4.0 reserves /open/. Registration and
+ * the announced prefix live in open-routes.mjs.)
  *
  * Navigates Obsidian to the specified file in the active pane, then returns a
  * tiny HTML status page. Bringing Obsidian to the OS foreground from the
@@ -62,7 +65,8 @@ export function makeOpenHandler(app: App, foregroundViaProtocol?: () => boolean)
       }
 
       // Extract the vault-relative path. We register the route as
-      // '/open/*', so Express puts the matched part in req.params[0]
+      // '<base>/*' (base = /mcp-router-bridge/open or /open), so Express
+      // puts the matched part in req.params[0]
       // (Express 4) — already URL-decoded. We fall back to parsing
       // req.path or req.url directly if for some reason that's not set
       // (different Express versions or registration patterns).
@@ -71,6 +75,8 @@ export function makeOpenHandler(app: App, foregroundViaProtocol?: () => boolean)
         rawPath = req.params[0];
       } else {
         const fullPath: string = String(req.path || req.url || '');
+        // '/open/' is a suffix of both bases, so indexOf finds the right
+        // spot for /mcp-router-bridge/open/<path> as well.
         const prefix = '/open/';
         const idx = fullPath.indexOf(prefix);
         if (idx === -1) {

@@ -7,8 +7,8 @@
  * the resolver redirects to this device's `/open/<path>`.
  *
  * Contract (shared with the resolver — do not change shape):
- *   GET              → 200 {"pong":true}
- *   GET ?v=<name>    → 200 {"pong":true} if the URL-decoded <name> strictly
+ *   GET              → 200 {"pong":true,"openPrefix":"/mcp-router-bridge/open/"}
+ *   GET ?v=<name>    → 200 (same body) if the URL-decoded <name> strictly
  *                      equals this vault's name (app.vault.getName()),
  *                      otherwise 404 (same four headers — the page's CORS
  *                      fetch must be able to read the status either way)
@@ -24,9 +24,20 @@
  * resolver open the wrong note. With `?v=`, only the bridge actually
  * serving the expected vault answers 200.
  *
+ * `openPrefix` (since 0.10.0) is the path prefix under which THIS bridge's
+ * public click-to-open route actually got registered — `/mcp-router-bridge/open/`
+ * normally, `/open/` on a host that only accepted the legacy route (see
+ * open-routes.mjs: Local REST API 5.4.0 refuses `/open/*` as a public route).
+ * Clients build `http://127.0.0.1:<port><openPrefix><encoded path>` from it
+ * and fall back to `/open/` when the key is absent (bridge < 0.10.0). It is
+ * omitted when no click-to-open route registered at all. Additive: a client
+ * that only checks `pong === true` is unaffected.
+ *
  * Anti-fingerprinting: the body is a bare pong — no vault name, no version,
- * no port list. A local prober learns only "a bridge listens here", which the
- * open TCP port reveals anyway. The `v` check preserves this: the route
+ * no port list. `openPrefix` is a constant of the plugin, and the route it
+ * names answers anyone who tries it, so it discloses nothing a prober could
+ * not learn by requesting that path. A local prober learns only "a bridge
+ * listens here", which the open TCP port reveals anyway. The `v` check preserves this: the route
  * never REVEALS the vault name, it only CONFIRMS a name the requester
  * already knows (confirmation oracle, not disclosure) — the 404 body is
  * empty and echoes nothing.
@@ -118,14 +129,17 @@ export function extractVaultParam(req) {
  * which receives `app`). `getVaultName` is read lazily at request time
  * (vault renames, late init).
  *
- *   GET /ping            → 200 {"pong":true}
+ *   GET /ping            → 200 {"pong":true[,"openPrefix":<prefix>]}
  *   GET /ping?v=<name>   → 200 if <name> (URL-decoded) === getVaultName(),
  *                          else 404 with the same four headers, empty body
  *
  * @param {() => string} getVaultName
+ * @param {() => (string | null | undefined)} [getOpenPrefix] read lazily at
+ *   request time — the open route registers in the same pass as /ping, and
+ *   re-registers when Local REST API reloads. A non-string result omits the key.
  * @returns {(req: any, res: any) => void}
  */
-export function makePingGetHandler(getVaultName) {
+export function makePingGetHandler(getVaultName, getOpenPrefix) {
   return function handlePingGet(req, res) {
     if (!isLoopbackRequest(req)) {
       res.status(403).type('text/plain').send('loopback only');
@@ -151,7 +165,16 @@ export function makePingGetHandler(getVaultName) {
       }
     }
 
-    res.status(200).json({ pong: true });
+    /** @type {{ pong: true, openPrefix?: string }} */
+    const body = { pong: true };
+    let openPrefix;
+    try {
+      openPrefix = typeof getOpenPrefix === 'function' ? getOpenPrefix() : undefined;
+    } catch {
+      openPrefix = undefined; // a broken getter must not break the probe
+    }
+    if (typeof openPrefix === 'string' && openPrefix) body.openPrefix = openPrefix;
+    res.status(200).json(body);
   };
 }
 

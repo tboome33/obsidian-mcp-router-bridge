@@ -85,6 +85,40 @@ describe('GET /ping', () => {
     assert.deepEqual(Object.keys(res.jsonBody), ['pong']);
   });
 
+  test('announces the registered click-to-open prefix as openPrefix', () => {
+    const handler = makePingGetHandler(() => VAULT_NAME, () => '/mcp-router-bridge/open/');
+    const res = mockRes();
+    handler({ ip: '127.0.0.1' }, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.jsonBody, { pong: true, openPrefix: '/mcp-router-bridge/open/' });
+    // Still nothing else: no vault name, no version.
+    assert.deepEqual(Object.keys(res.jsonBody), ['pong', 'openPrefix']);
+  });
+
+  test('openPrefix rides on a matching ?v= confirmation too', () => {
+    const handler = makePingGetHandler(() => VAULT_NAME, () => '/open/');
+    const res = mockRes();
+    handler({ ip: '127.0.0.1', query: { v: VAULT_NAME } }, res);
+    assert.deepEqual(res.jsonBody, { pong: true, openPrefix: '/open/' });
+  });
+
+  test('a ?v= mismatch still answers an empty 404 (openPrefix never leaks there)', () => {
+    const handler = makePingGetHandler(() => VAULT_NAME, () => '/mcp-router-bridge/open/');
+    const res = mockRes();
+    handler({ ip: '127.0.0.1', query: { v: 'other' } }, res);
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.jsonBody, undefined);
+  });
+
+  test('no open route registered (null), empty or throwing getter → key omitted, probe still 200', () => {
+    for (const getter of [() => null, () => '', () => 42, () => { throw new Error('boom'); }]) {
+      const res = mockRes();
+      makePingGetHandler(() => VAULT_NAME, getter)({ ip: '127.0.0.1' }, res);
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.jsonBody, { pong: true });
+    }
+  });
+
   test('IPv4-mapped IPv6 loopback accepted', () => {
     const res = mockRes();
     handlePingGet({ ip: '::ffff:127.0.0.1' }, res);
