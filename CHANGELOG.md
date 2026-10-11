@@ -4,7 +4,34 @@ All notable changes to `mcp-router-bridge` (the Obsidian community plugin) are d
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-11 — click-to-open moves to `/mcp-router-bridge/open/`, because Local REST API 5.4.0 reserves `/open/`
+
 ### Fixed
+
+- **Click-to-open links answered 401 on every vault running Local REST API 5.4.0.** A click on `http://127.0.0.1:<insecurePort>/open/<path>` returned `{"message": "Authorization required. …", "errorCode": 40101}` instead of opening the note. Seen on 2026-10-11 on DEDIBOX-HERMES (27153) and DEDIBOX (27162); vaults still on 4.0.2 (NASQNAP) were fine.
+
+  Cause: Local REST API 5.4.0 reserves eight top-level prefixes for its own routes (`BUILT_IN_ROUTE_PREFIXES` = `vault`, `active`, `search`, `commands`, `events`, `mcp`, `open`, `tags`), and its `addPublicRoute()` throws for any public route whose first segment is one of them. The bridge called `addPublicRoute('/open/*')` inside a `try`/`catch` that only logged the error, so the route never existed. The request then reached 5.4.0's own `/open/*` route, which is authenticated, behind the Bearer check: hence the 401. `/ping` stayed public and kept answering 200, so nothing looked wrong from a probe. `addRoute()` (authenticated) does no such check, so `/search/smart`, `/vault-cas/*`, `/smart-env/sources` and `/templates/execute` were unaffected. `POST /search/smart` does not collide with the native `/search/` either: 5.4.0 only mounts `/search/` and `/search/simple/`, and Express does not match `/search/smart` against them (checked in 5.4.0's source and live).
+
+### Added
+
+- **`GET /mcp-router-bridge/open/<path>`** — the click-to-open route, now under the plugin's own id, the namespace Local REST API recommends for public routes. Same handler, same query parameters (`?h=`, `&reveal=0`), same security model as before. It works on every Local REST API version.
+- **`openPrefix` in `GET /ping`'s body** — the prefix of the click-to-open route that actually registered: `{"pong":true,"openPrefix":"/mcp-router-bridge/open/"}`. Clients build `http://127.0.0.1:<port><openPrefix><encoded path>` and fall back to `/open/` when the key is absent (bridge < 0.10.0). The key is omitted if no click-to-open route registered. Additive: a client that only checks `pong === true`, like the smart-link resolver, is unaffected. A `?v=` mismatch still answers an empty 404.
+- **`src/handlers/open-routes.mjs`** — the registration order and the announced prefix, as a pure module. It never throws: a refused candidate is reported, so it cannot stop the next one.
+- **`tests/open-routes.test.mjs`** — a fake `addPublicRoute` that reproduces 5.4.0's reserved-prefix rule verbatim (and 4.x's absence of one), plus degraded hosts. `tests/ping.test.mjs` covers `openPrefix`.
+
+### Changed
+
+- **The legacy `GET /open/*` is still registered, as the second attempt.** Local REST API 4.x accepts it, so links built by an older router keep working there. 5.4.0 refuses it; the bridge now logs one `console.info` line and moves on, instead of a `console.error`.
+
+### Verified live (2026-10-11)
+
+| Vault | Local REST API | `openPrefix` | `/mcp-router-bridge/open/` | `/open/` |
+|---|---|---|---|---|
+| DEDIBOX-HERMES (27153) | 5.4.0 | announced | 200 | 401 (reserved by 5.4.0, expected) |
+| DEDIBOX (27162) | 5.4.0 | announced | 200 | 401 (reserved by 5.4.0, expected) |
+| NASQNAP (27148) | 4.0.2 | announced | 200 | 200 |
+
+### Fixed (CI)
 
 - **The release workflow no longer gives up when the release already exists — 0.9.1 shipped with no assets because of it.** `.github/workflows/release.yml` ended in a single `gh release create "$tag" … main.js manifest.json`. When a release for the tag had already been created by hand (the habit here: `git push --tags`, then a `gh release create` with a descriptive title, moments before the runner reaches that step), the command aborted with *"a release with the same tag name already exists"*, the step failed, and **the built assets were never uploaded**. The hand-made release stayed on GitHub carrying `assets: []`, so BRAT answered *"A manifest.json file does not exist in the latest release of the repository"* on every vault following the plugin, at every startup.
 
